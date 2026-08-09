@@ -118,7 +118,25 @@ interface DistributionResult {
   bars: { label: string; value: number }[]
 }
 
-export type WorkspaceTab = 'upload' | 'profile' | 'analysis' | 'chat' | 'forecast' | 'clean' | 'eda' | 'history'
+interface VizChart {
+  chart_type: string
+  x: string | null
+  y: string | null
+  title: string
+  image_base64: string
+}
+
+interface VizGenerateResult {
+  chart_type: string
+  x: string | null
+  y: string | null
+  title: string | null
+  image_base64: string
+  interpreted: boolean
+  reasoning: string | null
+}
+
+export type WorkspaceTab = 'upload' | 'profile' | 'analysis' | 'chat' | 'forecast' | 'clean' | 'eda' | 'visualize' | 'history'
 
 interface UploadDatasetProps {
   activeTab: WorkspaceTab
@@ -189,6 +207,17 @@ export default function UploadDataset({
   const [distributionLoading, setDistributionLoading] = useState(false)
   const [distributionError, setDistributionError] = useState<string | null>(null)
 
+  const [vizChartType, setVizChartType] = useState('bar')
+  const [vizX, setVizX] = useState('')
+  const [vizY, setVizY] = useState('')
+  const [vizNlRequest, setVizNlRequest] = useState('')
+  const [vizLoading, setVizLoading] = useState(false)
+  const [vizError, setVizError] = useState<string | null>(null)
+  const [vizResult, setVizResult] = useState<VizGenerateResult | null>(null)
+  const [dashboardCharts, setDashboardCharts] = useState<VizChart[] | null>(null)
+  const [dashboardLoading, setDashboardLoading] = useState(false)
+  const [dashboardError, setDashboardError] = useState<string | null>(null)
+
   function resetDownstreamState() {
     setDomainResult(null)
     setDomainError(null)
@@ -211,6 +240,13 @@ export default function UploadDataset({
     setSelectedChartColumn('')
     setDistribution(null)
     setDistributionError(null)
+    setVizResult(null)
+    setVizError(null)
+    setVizX('')
+    setVizY('')
+    setVizNlRequest('')
+    setDashboardCharts(null)
+    setDashboardError(null)
   }
 
   async function loadHistory() {
@@ -612,6 +648,69 @@ export default function UploadDataset({
     }
   }
 
+  async function handleGenerateChart(useNaturalLanguage: boolean) {
+    if (!result) return
+    setVizLoading(true)
+    setVizError(null)
+    setVizResult(null)
+    try {
+      const headers = await authHeader()
+      const body: Record<string, unknown> = { dataset_id: result.dataset_id }
+      if (useNaturalLanguage) {
+        if (!vizNlRequest.trim()) {
+          setVizError('Describe the chart you want first.')
+          setVizLoading(false)
+          return
+        }
+        body.nl_request = vizNlRequest.trim()
+      } else {
+        body.chart_type = vizChartType
+        if (vizX) body.x = vizX
+        if (vizY) body.y = vizY
+      }
+
+      const response = await fetch(`${API_BASE_URL}/viz/generate`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Chart generation failed (${response.status})`)
+      }
+      setVizResult(await response.json())
+    } catch (err) {
+      setVizError((err as Error).message)
+    } finally {
+      setVizLoading(false)
+    }
+  }
+
+  async function handleGenerateDashboard() {
+    if (!result) return
+    setDashboardLoading(true)
+    setDashboardError(null)
+    setDashboardCharts(null)
+    try {
+      const headers = await authHeader()
+      const response = await fetch(`${API_BASE_URL}/viz/dashboard`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dataset_id: result.dataset_id }),
+      })
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Dashboard generation failed (${response.status})`)
+      }
+      const data = await response.json()
+      setDashboardCharts(data.charts)
+    } catch (err) {
+      setDashboardError((err as Error).message)
+    } finally {
+      setDashboardLoading(false)
+    }
+  }
+
   const tabs: { id: WorkspaceTab; label: string; disabled?: boolean }[] = [
     { id: 'upload', label: 'Upload CSV' },
     { id: 'profile', label: 'Data profile', disabled: !result },
@@ -620,6 +719,7 @@ export default function UploadDataset({
     { id: 'forecast', label: 'Forecast', disabled: !result },
     { id: 'clean', label: 'Clean Data', disabled: !result },
     { id: 'eda', label: 'EDA & Charts', disabled: !result },
+    { id: 'visualize', label: 'Visualize', disabled: !result },
     { id: 'history', label: 'History' },
   ]
 
@@ -1268,6 +1368,151 @@ export default function UploadDataset({
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {/* ---------- Visualize tab ---------- */}
+      {result && activeTab === 'visualize' && (
+        <div className="space-y-6 py-6">
+          <div>
+            <h3 className="text-lg font-medium text-white">Visualization Agent</h3>
+            <p className="mt-1 text-sm text-slate-400">
+              Build a chart manually, describe one in plain language, or auto-generate a dashboard.
+            </p>
+          </div>
+
+          {/* Manual chart builder */}
+          <div className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-4">
+            <h4 className="text-sm font-medium text-slate-200">Build a chart</h4>
+            <div className="grid gap-4 sm:grid-cols-4">
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Chart type</label>
+                <select
+                  value={vizChartType}
+                  onChange={(e) => setVizChartType(e.target.value)}
+                  className="w-full rounded-lg bg-slate-800 border border-slate-700 px-3 py-2 text-sm text-slate-100"
+                >
+                  <option value="histogram">Histogram</option>
+                  <option value="bar">Bar</option>
+                  <option value="line">Line</option>
+                  <option value="scatter">Scatter</option>
+                  <option value="heatmap">Heatmap (correlation)</option>
+                </select>
+              </div>
+              {vizChartType !== 'heatmap' && (
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">X column</label>
+                  <select
+                    value={vizX}
+                    onChange={(e) => setVizX(e.target.value)}
+                    className="w-full rounded-lg bg-slate-800 border border-slate-700 px-3 py-2 text-sm text-slate-100"
+                  >
+                    <option value="">Select column</option>
+                    {result.columns.map((col) => (
+                      <option key={col.name} value={col.name}>
+                        {col.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              {(vizChartType === 'bar' || vizChartType === 'line' || vizChartType === 'scatter') && (
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Y column</label>
+                  <select
+                    value={vizY}
+                    onChange={(e) => setVizY(e.target.value)}
+                    className="w-full rounded-lg bg-slate-800 border border-slate-700 px-3 py-2 text-sm text-slate-100"
+                  >
+                    <option value="">Select column</option>
+                    {result.columns.map((col) => (
+                      <option key={col.name} value={col.name}>
+                        {col.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <div className="flex items-end">
+                <button
+                  onClick={() => handleGenerateChart(false)}
+                  disabled={vizLoading}
+                  className="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium hover:bg-blue-500 disabled:opacity-50"
+                >
+                  {vizLoading ? 'Generating...' : 'Generate chart'}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Natural language chart request */}
+          <div className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-3">
+            <h4 className="text-sm font-medium text-slate-200">Or describe the chart you want</h4>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={vizNlRequest}
+                onChange={(e) => setVizNlRequest(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !vizLoading) handleGenerateChart(true)
+                }}
+                placeholder='e.g. "show revenue by region as a bar chart"'
+                className="flex-1 rounded-lg bg-slate-800 border border-slate-700 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500"
+              />
+              <button
+                onClick={() => handleGenerateChart(true)}
+                disabled={vizLoading}
+                className="rounded-lg bg-purple-600 px-4 py-2 text-sm font-medium hover:bg-purple-500 disabled:opacity-50 shrink-0"
+              >
+                {vizLoading ? 'Thinking...' : 'Generate'}
+              </button>
+            </div>
+          </div>
+
+          {vizError && <ErrorBanner message={vizError} />}
+
+          {vizResult && (
+            <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4 space-y-2">
+              {vizResult.interpreted && vizResult.reasoning && (
+                <p className="text-xs text-purple-300">AI interpretation: {vizResult.reasoning}</p>
+              )}
+              <img
+                src={`data:image/png;base64,${vizResult.image_base64}`}
+                alt={vizResult.title || 'Generated chart'}
+                className="w-full rounded-lg border border-slate-800"
+              />
+            </div>
+          )}
+
+          {/* Auto dashboard */}
+          <div className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h4 className="text-sm font-medium text-slate-200">Auto-generated dashboard</h4>
+              <button
+                onClick={handleGenerateDashboard}
+                disabled={dashboardLoading}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium hover:bg-emerald-500 disabled:opacity-50"
+              >
+                {dashboardLoading ? 'Building dashboard...' : 'Generate dashboard'}
+              </button>
+            </div>
+
+            {dashboardError && <ErrorBanner message={dashboardError} />}
+
+            {dashboardCharts && (
+              <div className="grid gap-4 sm:grid-cols-2">
+                {dashboardCharts.map((chart, i) => (
+                  <div key={i} className="rounded-lg border border-slate-800 overflow-hidden">
+                    <img
+                      src={`data:image/png;base64,${chart.image_base64}`}
+                      alt={chart.title}
+                      className="w-full"
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 

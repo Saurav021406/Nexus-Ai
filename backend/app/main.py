@@ -9,6 +9,7 @@ from app.routers import chat
 from app.routers import forecast
 from app.routers import cleaning
 from app.routers import eda
+from app.routers import viz
 
 app = FastAPI(title="Nexus AI Backend", version="0.1.0")
 
@@ -27,6 +28,7 @@ app.include_router(chat.router)
 app.include_router(forecast.router)
 app.include_router(cleaning.router)
 app.include_router(eda.router)
+app.include_router(viz.router)
 
 
 @app.get("/")
