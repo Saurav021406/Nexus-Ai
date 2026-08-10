@@ -15,4 +15,4 @@ def get_agent(domain: str):
 
 
 def available_agent_domains() -> set[str]:
-    return set(AGENT_REGISTRY)
+    return set(AGENT_REGISTRY.keys())
