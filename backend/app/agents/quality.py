@@ -1,17 +1,23 @@
 """Combined Reviewer + Security check.
 
-Merged into a single Gemini call (instead of two separate agent calls) to
+Merged into a single call (instead of two separate agent calls) to
 conserve API quota. Returns the same "review" and "security" shapes the
 Manager and frontend already expect - only the number of requests changes.
 """
 
 import json
 import google.generativeai as genai
+from openai import OpenAI
 
 from app.config import settings
 from app.agents.state import WorkflowState
 
 genai.configure(api_key=settings.gemini_api_key)
+
+nvidia_client = OpenAI(
+    base_url="https://integrate.api.nvidia.com/v1",
+    api_key=settings.nvidia_api_key,
+)
 
 
 def quality_check(state: WorkflowState) -> dict:
@@ -54,7 +60,26 @@ Respond ONLY with this exact JSON shape (no markdown, no extra text):
 }}
 """
 
-    model = genai.GenerativeModel("gemini-3-flash-preview")
-    response = model.generate_content(prompt)
-    text = response.text.strip().replace("```json", "").replace("```", "").strip()
+    text = None
+
+    # PRIMARY: NVIDIA
+    try:
+        completion = nvidia_client.chat.completions.create(
+            model="nvidia/nemotron-3-super-120b-a12b",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=1,
+            top_p=0.95,
+            max_tokens=2048,
+        )
+        text = completion.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"NVIDIA failed in quality_check: {e}")
+
+    # FALLBACK: Gemini
+    if not text:
+        model = genai.GenerativeModel("gemini-3-flash-preview")
+        response = model.generate_content(prompt)
+        text = response.text.strip()
+
+    text = text.replace("```json", "").replace("```", "").strip()
     return json.loads(text)

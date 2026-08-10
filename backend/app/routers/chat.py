@@ -7,6 +7,7 @@ and consistent with the Analysis tab.
 
 import json
 import google.generativeai as genai
+from openai import OpenAI
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -17,6 +18,11 @@ from app.services.datasets import build_data_summary, get_dataset_dataframe
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 genai.configure(api_key=settings.gemini_api_key)
+
+nvidia_client = OpenAI(
+    base_url="https://integrate.api.nvidia.com/v1",
+    api_key=settings.nvidia_api_key,
+)
 
 MAX_HISTORY_MESSAGES = 6  # keep prompts small and cheap
 
@@ -58,11 +64,28 @@ USER QUESTION: {payload.question}
 
 Answer in 2-4 short sentences, plain text, no markdown formatting, no JSON."""
 
+    answer = None
+
+    # PRIMARY: NVIDIA
     try:
-        model = genai.GenerativeModel("gemini-3-flash-preview")
-        response = model.generate_content(prompt)
-        answer = response.text.strip()
+        completion = nvidia_client.chat.completions.create(
+            model="nvidia/nemotron-3-super-120b-a12b",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=1,
+            top_p=0.95,
+            max_tokens=1024,
+        )
+        answer = completion.choices[0].message.content.strip()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
+        print(f"NVIDIA failed: {e}")
+
+    # FALLBACK: Gemini
+    if not answer:
+        try:
+            model = genai.GenerativeModel("gemini-3-flash-preview")
+            response = model.generate_content(prompt)
+            answer = response.text.strip()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
 
     return {"answer": answer}
