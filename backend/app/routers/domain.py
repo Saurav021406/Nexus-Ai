@@ -73,6 +73,7 @@ async def analyze_domain(payload: AnalyzeRequest, user=Depends(get_current_user)
         user_id=user.id,
         data_summary=data_summary,
         classification=route.to_dict(),
+        include_secondary_specialists=bool(payload.selected_domains),
     )
 
     final_state = await run_manager(state)

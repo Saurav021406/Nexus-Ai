@@ -939,6 +939,7 @@ export default function UploadDataset({
             )}
 
             {agentError && <ErrorBanner message={agentError} />}
+            {agentResult?.error && <ErrorBanner message={agentResult.error} />}
 
             {agentResult && (
               <div className="space-y-4">
@@ -946,7 +947,7 @@ export default function UploadDataset({
                   <div>
                     <p className="text-sm text-slate-400 mb-1">Participating specialists</p>
                     <div className="flex flex-wrap gap-2">
-                      {agentResult.participating_agents.map((agent) => (
+                      {(agentResult.participating_agents ?? []).map((agent) => (
                         <span key={agent} className="rounded-full bg-indigo-900/60 px-2.5 py-1 text-xs text-indigo-100">
                           {agent}
                         </span>
@@ -960,7 +961,7 @@ export default function UploadDataset({
                   <div>
                     <p className="text-sm text-slate-400 mb-1">Key Metrics</p>
                     <ul className="list-disc list-inside space-y-1">
-                      {agentResult.key_metrics.map((metric, i) => (
+                      {(agentResult.key_metrics ?? []).map((metric, i) => (
                         <li key={i} className="text-sm text-slate-200">
                           {metric}
                         </li>
@@ -1052,9 +1053,9 @@ export default function UploadDataset({
                   )}
                 </div>
 
-                {agentResult.specialist_reports.length > 1 && (
+                {(agentResult.specialist_reports ?? []).length > 1 && (
                   <div className="grid gap-4 lg:grid-cols-2">
-                    {agentResult.specialist_reports.map((report) => (
+                    {(agentResult.specialist_reports ?? []).map((report) => (
                       <article key={report.domain} className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
                         <p className="text-sm font-semibold text-cyan-300">{report.domain} specialist</p>
                         {report.error ? (
