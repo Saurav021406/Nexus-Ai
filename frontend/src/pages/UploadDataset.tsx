@@ -238,6 +238,119 @@ const STAT_ICONS = [
   </svg>,
 ]
 
+// Small icon set used by the "System routing & execution details" panel.
+function domainIcon(domain: string) {
+  const key = domain.toLowerCase()
+  if (key.includes('health')) {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4">
+        <path
+          d="M12 21s-7-4.35-9.5-8.5C.5 8.5 3 5 6.5 5c2 0 3.5 1.2 4.5 2.5C12 6.2 13.5 5 15.5 5 19 5 21.5 8.5 20 12.5 17.5 16.65 12 21 12 21z"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinejoin="round"
+        />
+      </svg>
+    )
+  }
+  if (key.includes('educ')) {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4">
+        <path d="M12 3l9 5-9 5-9-5 9-5z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+        <path
+          d="M6 10.5V16c0 1 2.7 2.5 6 2.5s6-1.5 6-2.5v-5.5"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinejoin="round"
+        />
+      </svg>
+    )
+  }
+  if (key.includes('financ')) {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4">
+        <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.5" />
+        <path
+          d="M12 7v10M9 9.5c0-1 1-1.5 3-1.5s3 .8 3 2-1.3 1.7-3 2-3 .9-3 2 1.3 2 3 2 3-.5 3-1.5"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+        />
+      </svg>
+    )
+  }
+  if (key.includes('hr')) {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4">
+        <circle cx="9" cy="8" r="3" stroke="currentColor" strokeWidth="1.5" />
+        <circle cx="17" cy="9" r="2.5" stroke="currentColor" strokeWidth="1.5" />
+        <path
+          d="M3 20c0-3 2.7-5 6-5s6 2 6 5M15 20c0-2.2 1.6-4 4-4.3"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+        />
+      </svg>
+    )
+  }
+  if (key.includes('retail')) {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4">
+        <path
+          d="M4 8h16l-1.5 10a2 2 0 0 1-2 1.7H7.5a2 2 0 0 1-2-1.7L4 8z"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinejoin="round"
+        />
+        <path d="M8 8V6a4 4 0 0 1 8 0v2" stroke="currentColor" strokeWidth="1.5" />
+      </svg>
+    )
+  }
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4">
+      <path
+        d="M4 19V9M10 19V5M16 19v-7M4 19h16"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+function DatasetIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className="h-5 w-5">
+      <ellipse cx="12" cy="6" rx="7" ry="2.5" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M5 6v6c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V6" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M5 12v6c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5v-6" stroke="currentColor" strokeWidth="1.5" />
+    </svg>
+  )
+}
+
+function OrchestratorIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className="h-5 w-5">
+      <rect x="7" y="7" width="10" height="10" rx="2" stroke="currentColor" strokeWidth="1.5" />
+      <path
+        d="M12 2v3M12 19v3M2 12h3M19 12h3M4.5 4.5l2 2M17.5 17.5l2 2M19.5 4.5l-2 2M6.5 17.5l-2 2"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      />
+    </svg>
+  )
+}
+
+function ArrowIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4 shrink-0 text-slate-600">
+      <path d="M4 12h14M13 6l6 6-6 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
 export default function UploadDataset({
   activeTab,
   onTabChange,
@@ -1080,14 +1193,14 @@ export default function UploadDataset({
                   </div>
                 )}
 
-                {/* Collapsible technical details */}
+                {/* System routing & execution details (visual plan + review) */}
                 {(agentResult.plan || agentResult.review || agentResult.security || agentResult.traces) && (
                   <div className="rounded-xl border border-slate-800 bg-slate-950/40">
                     <button
                       onClick={() => setShowSystemDetails((v) => !v)}
                       className="flex w-full items-center justify-between px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-400 hover:text-slate-200"
                     >
-                      <span>View system details (plan, review, traces)</span>
+                      <span>System routing &amp; execution details (plan &amp; review)</span>
                       <svg
                         viewBox="0 0 24 24"
                         fill="none"
@@ -1105,111 +1218,164 @@ export default function UploadDataset({
 
                     {showSystemDetails && (
                       <div className="space-y-4 border-t border-slate-800 p-4">
-                        <div>
-                          <p className="mb-1 text-sm text-slate-400">Participating specialists</p>
-                          <div className="flex flex-wrap gap-2">
-                            {(agentResult.participating_agents ?? []).map((agent) => (
-                              <span
-                                key={agent}
-                                className="rounded-full bg-indigo-900/60 px-2.5 py-1 text-xs text-indigo-100"
-                              >
-                                {agent}
-                              </span>
-                            ))}
-                          </div>
+                        <div className="grid gap-4 lg:grid-cols-2">
+                          {/* Panel A: routing flow, icon-first, minimal text */}
+                          {agentResult.plan && agentResult.plan.length > 0 && (
+                            <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+                              <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-cyan-300">
+                                Routing plan
+                              </p>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <div className="flex flex-col items-center gap-1">
+                                  <div className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-800 text-cyan-300">
+                                    <DatasetIcon />
+                                  </div>
+                                  <span className="text-[10px] text-slate-500">Source</span>
+                                </div>
+                                {agentResult.plan.map((step) => (
+                                  <div key={step.step} className="flex items-center gap-2">
+                                    <ArrowIcon />
+                                    <div className="flex flex-col items-center gap-1">
+                                      <div className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-800 text-cyan-300">
+                                        {domainIcon(step.agent)}
+                                      </div>
+                                      <span className="text-[10px] font-medium text-slate-300">
+                                        {step.agent}
+                                      </span>
+                                    </div>
+                                  </div>
+                                ))}
+                                <ArrowIcon />
+                                <div className="flex flex-col items-center gap-1">
+                                  <div className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-800 text-indigo-300">
+                                    <OrchestratorIcon />
+                                  </div>
+                                  <span className="text-[10px] text-slate-500">Manager</span>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Panel B: validation, badge chips instead of sentences */}
+                          {(agentResult.review || agentResult.security) && (
+                            <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+                              <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-emerald-300">
+                                Validation
+                              </p>
+                              <div className="flex flex-wrap gap-2">
+                                {agentResult.review && (
+                                  <span
+                                    className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium ${
+                                      agentResult.review.approved
+                                        ? 'bg-emerald-900/50 text-emerald-300'
+                                        : 'bg-amber-900/50 text-amber-300'
+                                    }`}
+                                  >
+                                    <span
+                                      className={`h-1.5 w-1.5 rounded-full ${
+                                        agentResult.review.approved ? 'bg-emerald-400' : 'bg-amber-400'
+                                      }`}
+                                    />
+                                    Quality: <span className="capitalize">{agentResult.review.overall_quality}</span>
+                                  </span>
+                                )}
+                                {agentResult.security && (
+                                  <span
+                                    className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium ${
+                                      agentResult.security.safe_to_show
+                                        ? 'bg-emerald-900/50 text-emerald-300'
+                                        : 'bg-amber-900/50 text-amber-300'
+                                    }`}
+                                  >
+                                    <span
+                                      className={`h-1.5 w-1.5 rounded-full ${
+                                        agentResult.security.safe_to_show ? 'bg-emerald-400' : 'bg-amber-400'
+                                      }`}
+                                    />
+                                    Risk: <span className="capitalize">{agentResult.security.risk_level}</span>
+                                  </span>
+                                )}
+                                {!agentResult.review?.issues?.length && !agentResult.security?.findings?.length && (
+                                  <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-900/50 px-2.5 py-1 text-[11px] font-medium text-emerald-300">
+                                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                                    No issues found
+                                  </span>
+                                )}
+                              </div>
+                              {(agentResult.review?.issues?.length || agentResult.security?.findings?.length) ? (
+                                <ul className="mt-3 space-y-1.5 text-[11px] text-amber-300">
+                                  {agentResult.review?.issues?.map((issue, i) => (
+                                    <li key={`ri-${i}`} className="flex items-start gap-1.5">
+                                      <span className="mt-1 h-1 w-1 shrink-0 rounded-full bg-amber-400" />
+                                      {issue}
+                                    </li>
+                                  ))}
+                                  {agentResult.security?.findings?.map((f, i) => (
+                                    <li key={`sf-${i}`} className="flex items-start gap-1.5">
+                                      <span className="mt-1 h-1 w-1 shrink-0 rounded-full bg-amber-400" />
+                                      {f}
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : null}
+                            </div>
+                          )}
                         </div>
-
-                        {agentResult.plan && agentResult.plan.length > 0 && (
-                          <div>
-                            <p className="mb-1 text-sm text-slate-400">Manager plan</p>
-                            <div className="flex flex-wrap gap-2">
-                              {agentResult.plan.map((step) => (
-                                <span
-                                  key={step.step}
-                                  className="rounded-full bg-slate-800 px-2.5 py-1 text-xs text-slate-200"
-                                >
-                                  {step.step}. {step.agent} ({step.task})
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-
-                        {agentResult.review && (
-                          <div>
-                            <p className="mb-1 text-sm text-slate-400">Reviewer</p>
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span
-                                className={`rounded-full px-2.5 py-1 text-xs font-medium ${
-                                  agentResult.review.overall_quality === 'high'
-                                    ? 'bg-emerald-900/60 text-emerald-200'
-                                    : agentResult.review.overall_quality === 'medium'
-                                      ? 'bg-amber-900/60 text-amber-200'
-                                      : 'bg-red-900/60 text-red-200'
-                                }`}
-                              >
-                                Quality: {agentResult.review.overall_quality}
-                              </span>
-                              <span className="text-xs text-slate-400">
-                                {agentResult.review.approved ? 'Approved' : 'Needs attention'}
-                              </span>
-                            </div>
-                            {agentResult.review.issues?.length > 0 && (
-                              <ul className="mt-2 list-disc list-inside text-xs text-amber-300">
-                                {agentResult.review.issues.map((issue, i) => (
-                                  <li key={i}>{issue}</li>
-                                ))}
-                              </ul>
-                            )}
-                          </div>
-                        )}
-
-                        {agentResult.security && (
-                          <div>
-                            <p className="mb-1 text-sm text-slate-400">Security</p>
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span
-                                className={`rounded-full px-2.5 py-1 text-xs font-medium ${
-                                  agentResult.security.risk_level === 'low'
-                                    ? 'bg-emerald-900/60 text-emerald-200'
-                                    : agentResult.security.risk_level === 'medium'
-                                      ? 'bg-amber-900/60 text-amber-200'
-                                      : 'bg-red-900/60 text-red-200'
-                                }`}
-                              >
-                                Risk: {agentResult.security.risk_level}
-                              </span>
-                              <span className="text-xs text-slate-400">
-                                {agentResult.security.safe_to_show ? 'Safe to show' : 'Blocked'}
-                              </span>
-                            </div>
-                            {agentResult.security.findings?.length > 0 && (
-                              <ul className="mt-2 list-disc list-inside text-xs text-amber-300">
-                                {agentResult.security.findings.map((f, i) => (
-                                  <li key={i}>{f}</li>
-                                ))}
-                              </ul>
-                            )}
-                          </div>
-                        )}
-
                         {agentResult.traces && agentResult.traces.length > 0 && (
                           <div>
                             <p className="mb-3 text-sm font-medium text-slate-300">Agent traces</p>
-                            <div className="max-h-64 space-y-2 overflow-y-auto text-xs">
-                              {agentResult.traces.map((t, i) => (
-                                <div
-                                  key={i}
-                                  className="flex flex-wrap gap-2 rounded-lg bg-slate-900/80 px-3 py-2"
-                                >
-                                  <span className="font-medium text-cyan-300">{t.agent}</span>
-                                  <span className="text-slate-400">→ {t.action}</span>
-                                  {t.error && <span className="text-red-400">Error: {t.error}</span>}
-                                </div>
-                              ))}
+                            <div className="max-h-64 overflow-y-auto pr-1">
+                              {agentResult.traces.map((t, i) => {
+                                const isLast = i === agentResult.traces!.length - 1
+                                const dotColor = t.error
+                                  ? 'bg-red-400'
+                                  : t.action === 'completed' || t.action === 'finished'
+                                    ? 'bg-emerald-400'
+                                    : 'bg-cyan-400'
+                                const actionLabel = t.action.replace(/_/g, ' ')
+                                const time = new Date(t.timestamp * 1000).toLocaleTimeString([], {
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                  second: '2-digit',
+                                })
+                                return (
+                                  <div key={i} className="relative flex gap-3 pb-4 last:pb-0">
+                                    {!isLast && (
+                                      <span className="absolute left-[5px] top-3 h-full w-px bg-slate-800" />
+                                    )}
+                                    <span
+                                      className={`relative z-10 mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full ${dotColor}`}
+                                    />
+                                    <div className="flex flex-1 items-center justify-between gap-2 text-xs">
+                                      <span>
+                                        <span className="font-medium text-cyan-300">{t.agent}</span>
+                                        <span className="ml-1.5 capitalize text-slate-400">{actionLabel}</span>
+                                        {t.error && <span className="ml-1.5 text-red-400">— {t.error}</span>}
+                                      </span>
+                                      <span className="shrink-0 text-[10px] text-slate-600">{time}</span>
+                                    </div>
+                                  </div>
+                                )
+                              })}
                             </div>
                           </div>
                         )}
+
+                        <button
+                          onClick={() => setShowSystemDetails(false)}
+                          className="flex w-full items-center justify-center gap-2 rounded-lg border border-slate-800 bg-slate-900/60 py-2 text-xs font-semibold uppercase tracking-wide text-slate-400 hover:text-slate-200"
+                        >
+                          Close system details (plan &amp; review)
+                          <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4 rotate-180">
+                            <path
+                              d="M6 9l6 6 6-6"
+                              stroke="currentColor"
+                              strokeWidth="1.5"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                          </svg>
+                        </button>
                       </div>
                     )}
                   </div>
