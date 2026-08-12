@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
+import _createPlotlyComponent from 'react-plotly.js/factory'
+import Plotly from 'plotly.js-dist-min'
 import { supabase } from '../lib/supabaseClient'
+
+// FIX: Unwrap the function if Vite nested it inside a '.default' property
+const createPlotlyComponent = (_createPlotlyComponent as any).default || _createPlotlyComponent
+const Plot = createPlotlyComponent(Plotly as any)
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL as string
 
@@ -153,12 +159,17 @@ interface DistributionResult {
   bars: { label: string; value: number }[]
 }
 
+interface PlotlyFigure {
+  data: unknown[]
+  layout: Record<string, unknown>
+}
+
 interface VizChart {
   chart_type: string
   x: string | null
   y: string | null
   title: string
-  image_base64: string
+  figure: PlotlyFigure
 }
 
 interface VizGenerateResult {
@@ -166,7 +177,7 @@ interface VizGenerateResult {
   x: string | null
   y: string | null
   title: string | null
-  image_base64: string
+  figure: PlotlyFigure
   interpreted: boolean
   reasoning: string | null
 }
@@ -1321,6 +1332,7 @@ export default function UploadDataset({
                             </div>
                           )}
                         </div>
+
                         {agentResult.traces && agentResult.traces.length > 0 && (
                           <div>
                             <p className="mb-3 text-sm font-medium text-slate-300">Agent traces</p>
@@ -1894,10 +1906,13 @@ export default function UploadDataset({
               {vizResult.interpreted && vizResult.reasoning && (
                 <p className="text-xs text-purple-300">AI interpretation: {vizResult.reasoning}</p>
               )}
-              <img
-                src={`data:image/png;base64,${vizResult.image_base64}`}
-                alt={vizResult.title || 'Generated chart'}
-                className="w-full rounded-lg border border-slate-800"
+              <Plot
+                data={vizResult.figure.data}
+                layout={{ ...vizResult.figure.layout, autosize: true }}
+                config={{ responsive: true, displaylogo: false }}
+                useResizeHandler
+                style={{ width: '100%', height: '420px' }}
+                className="rounded-lg border border-slate-800"
               />
             </div>
           )}
@@ -1921,10 +1936,12 @@ export default function UploadDataset({
               <div className="grid gap-4 sm:grid-cols-2">
                 {dashboardCharts.map((chart, i) => (
                   <div key={i} className="rounded-lg border border-slate-800 overflow-hidden">
-                    <img
-                      src={`data:image/png;base64,${chart.image_base64}`}
-                      alt={chart.title}
-                      className="w-full"
+                    <Plot
+                      data={chart.figure.data}
+                      layout={{ ...chart.figure.layout, autosize: true }}
+                      config={{ responsive: true, displaylogo: false }}
+                      useResizeHandler
+                      style={{ width: '100%', height: '340px' }}
                     />
                   </div>
                 ))}

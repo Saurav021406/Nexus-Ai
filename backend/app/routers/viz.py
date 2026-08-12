@@ -64,7 +64,7 @@ async def generate(payload: GenerateRequest, user=Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="chart_type or nl_request is required")
 
     try:
-        image_b64 = await run_in_threadpool(
+        figure = await run_in_threadpool(
             generate_chart, df, chart_type, x, y, payload.color, agg, title
         )
     except ValueError as e:
@@ -77,7 +77,7 @@ async def generate(payload: GenerateRequest, user=Depends(get_current_user)):
         "x": x,
         "y": y,
         "title": title,
-        "image_base64": image_b64,
+        "figure": figure,
         "interpreted": interpreted,
         "reasoning": reasoning,
     }

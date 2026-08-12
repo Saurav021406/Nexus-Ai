@@ -1,17 +1,14 @@
 """Visualization Agent: turns a dataset (+ either explicit chart params or a
-natural-language request) into a rendered chart. Charts are rendered with
-matplotlib directly in-process (no subprocess/browser involved, unlike
-Plotly's kaleido export) and returned as base64 PNG - the frontend just
-needs an <img> tag."""
+natural-language request) into an interactive chart. Charts are built with
+Plotly and returned as Plotly's native JSON figure spec (data + layout) -
+the frontend renders it directly with react-plotly.js, which gives
+zoom/pan/hover/export-to-PNG for free, unlike the old static matplotlib PNGs.
+"""
 
-import base64
-import io
 import json
 
-import matplotlib
-matplotlib.use("Agg")  # non-interactive backend, safe for a server process
-import matplotlib.pyplot as plt
 import pandas as pd
+import plotly.graph_objects as go
 import google.generativeai as genai
 
 from app.config import settings
@@ -26,26 +23,17 @@ GRID_COLOR = "#334155"
 ACCENT_COLORS = ["#60a5fa", "#a78bfa", "#34d399", "#fbbf24", "#f87171", "#22d3ee"]
 
 
-def _new_figure():
-    fig, ax = plt.subplots(figsize=(9, 5.2), dpi=110)
-    fig.patch.set_facecolor(BG_COLOR)
-    ax.set_facecolor(BG_COLOR)
-    ax.tick_params(colors=TEXT_COLOR, labelsize=9)
-    ax.xaxis.label.set_color(TEXT_COLOR)
-    ax.yaxis.label.set_color(TEXT_COLOR)
-    ax.title.set_color(TEXT_COLOR)
-    for spine in ax.spines.values():
-        spine.set_color(GRID_COLOR)
-    ax.grid(True, color=GRID_COLOR, linewidth=0.5, alpha=0.5)
-    return fig, ax
-
-
-def _fig_to_base64(fig) -> str:
-    buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", facecolor=fig.get_facecolor(), bbox_inches="tight")
-    plt.close(fig)
-    buffer.seek(0)
-    return base64.b64encode(buffer.read()).decode("utf-8")
+def _base_layout(title: str | None) -> dict:
+    return dict(
+        title=dict(text=title or "", font=dict(color=TEXT_COLOR, size=15)),
+        paper_bgcolor=BG_COLOR,
+        plot_bgcolor=BG_COLOR,
+        font=dict(color=TEXT_COLOR, size=12),
+        xaxis=dict(gridcolor=GRID_COLOR, zerolinecolor=GRID_COLOR),
+        yaxis=dict(gridcolor=GRID_COLOR, zerolinecolor=GRID_COLOR),
+        margin=dict(l=50, r=30, t=50, b=50),
+        legend=dict(font=dict(color=TEXT_COLOR)),
+    )
 
 
 def generate_chart(
@@ -56,20 +44,21 @@ def generate_chart(
     color: str | None = None,
     agg: str = "sum",
     title: str | None = None,
-) -> str:
+) -> dict:
+    """Returns a Plotly figure as a plain JSON-serializable dict: {"data": [...], "layout": {...}}"""
     if chart_type not in VALID_CHART_TYPES:
         raise ValueError(f"Unsupported chart type: {chart_type}")
 
-    fig, ax = _new_figure()
+    fig = go.Figure()
 
     if chart_type == "histogram":
         if not x or x not in df.columns:
             raise ValueError("Histogram needs a valid 'x' column")
         series = pd.to_numeric(df[x], errors="coerce").dropna()
-        ax.hist(series, bins=20, color=ACCENT_COLORS[0], edgecolor=BG_COLOR)
-        ax.set_xlabel(x)
-        ax.set_ylabel("Count")
-        ax.set_title(title or f"Distribution of {x}")
+        fig.add_trace(go.Histogram(x=series, nbinsx=20, marker_color=ACCENT_COLORS[0]))
+        fig.update_layout(**_base_layout(title or f"Distribution of {x}"))
+        fig.update_xaxes(title_text=x)
+        fig.update_yaxes(title_text="Count")
 
     elif chart_type == "bar":
         if not x or x not in df.columns:
@@ -77,16 +66,15 @@ def generate_chart(
         if y and y in df.columns:
             agg_func = {"sum": "sum", "mean": "mean", "count": "count", "median": "median"}.get(agg, "sum")
             grouped = df.groupby(x)[y].agg(agg_func).sort_values(ascending=False).head(25)
-            ax.bar(grouped.index.astype(str), grouped.values, color=ACCENT_COLORS[1])
-            ax.set_ylabel(f"{y} ({agg})")
-            ax.set_title(title or f"{y} ({agg}) by {x}")
+            fig.add_trace(go.Bar(x=grouped.index.astype(str), y=grouped.values, marker_color=ACCENT_COLORS[1]))
+            fig.update_yaxes(title_text=f"{y} ({agg})")
+            fig.update_layout(**_base_layout(title or f"{y} ({agg}) by {x}"))
         else:
             counts = df[x].value_counts().head(25)
-            ax.bar(counts.index.astype(str), counts.values, color=ACCENT_COLORS[1])
-            ax.set_ylabel("Count")
-            ax.set_title(title or f"Count by {x}")
-        ax.set_xlabel(x)
-        plt.setp(ax.get_xticklabels(), rotation=40, ha="right")
+            fig.add_trace(go.Bar(x=counts.index.astype(str), y=counts.values, marker_color=ACCENT_COLORS[1]))
+            fig.update_yaxes(title_text="Count")
+            fig.update_layout(**_base_layout(title or f"Count by {x}"))
+        fig.update_xaxes(title_text=x, tickangle=-40)
 
     elif chart_type == "line":
         if not y or y not in df.columns:
@@ -100,15 +88,18 @@ def generate_chart(
             except Exception:
                 pass
             working = working.sort_values(x)
-            ax.plot(working[x], working[y], color=ACCENT_COLORS[2], linewidth=2)
-            ax.set_xlabel(x)
-            plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
+            fig.add_trace(
+                go.Scatter(x=working[x], y=working[y], mode="lines", line=dict(color=ACCENT_COLORS[2], width=2))
+            )
+            fig.update_xaxes(title_text=x)
         else:
             working = working.reset_index()
-            ax.plot(working.index, working[y], color=ACCENT_COLORS[2], linewidth=2)
-            ax.set_xlabel("Row index")
-        ax.set_ylabel(y)
-        ax.set_title(title or f"{y} trend")
+            fig.add_trace(
+                go.Scatter(x=working.index, y=working[y], mode="lines", line=dict(color=ACCENT_COLORS[2], width=2))
+            )
+            fig.update_xaxes(title_text="Row index")
+        fig.update_yaxes(title_text=y)
+        fig.update_layout(**_base_layout(title or f"{y} trend"))
 
     elif chart_type == "scatter":
         if not x or not y or x not in df.columns or y not in df.columns:
@@ -117,35 +108,48 @@ def generate_chart(
             categories = df[color].astype(str).unique()[:6]
             for i, cat in enumerate(categories):
                 subset = df[df[color].astype(str) == cat]
-                ax.scatter(subset[x], subset[y], label=cat, color=ACCENT_COLORS[i % len(ACCENT_COLORS)], alpha=0.75)
-            legend = ax.legend(facecolor=BG_COLOR, edgecolor=GRID_COLOR, fontsize=8)
-            for text in legend.get_texts():
-                text.set_color(TEXT_COLOR)
+                fig.add_trace(
+                    go.Scatter(
+                        x=subset[x],
+                        y=subset[y],
+                        mode="markers",
+                        name=str(cat),
+                        marker=dict(color=ACCENT_COLORS[i % len(ACCENT_COLORS)], opacity=0.75, size=7),
+                    )
+                )
         else:
-            ax.scatter(df[x], df[y], color=ACCENT_COLORS[0], alpha=0.75)
-        ax.set_xlabel(x)
-        ax.set_ylabel(y)
-        ax.set_title(title or f"{y} vs {x}")
+            fig.add_trace(
+                go.Scatter(
+                    x=df[x], y=df[y], mode="markers", marker=dict(color=ACCENT_COLORS[0], opacity=0.75, size=7)
+                )
+            )
+        fig.update_xaxes(title_text=x)
+        fig.update_yaxes(title_text=y)
+        fig.update_layout(**_base_layout(title or f"{y} vs {x}"))
 
     elif chart_type == "heatmap":
         numeric_df = df.select_dtypes(include="number")
         if numeric_df.shape[1] < 2:
             raise ValueError("Need at least 2 numeric columns for a correlation heatmap")
         corr = numeric_df.corr(numeric_only=True).round(2)
-        im = ax.imshow(corr.values, cmap="RdBu_r", vmin=-1, vmax=1)
-        ax.set_xticks(range(len(corr.columns)))
-        ax.set_yticks(range(len(corr.columns)))
-        ax.set_xticklabels(corr.columns, rotation=45, ha="right")
-        ax.set_yticklabels(corr.columns)
-        for i in range(len(corr.columns)):
-            for j in range(len(corr.columns)):
-                ax.text(j, i, corr.values[i, j], ha="center", va="center", color=TEXT_COLOR, fontsize=8)
-        cbar = fig.colorbar(im, ax=ax)
-        cbar.ax.yaxis.set_tick_params(color=TEXT_COLOR)
-        plt.setp(cbar.ax.get_yticklabels(), color=TEXT_COLOR)
-        ax.set_title(title or "Correlation heatmap")
+        fig.add_trace(
+            go.Heatmap(
+                z=corr.values,
+                x=list(corr.columns),
+                y=list(corr.columns),
+                colorscale="RdBu",
+                zmin=-1,
+                zmax=1,
+                text=corr.values,
+                texttemplate="%{text}",
+                textfont=dict(color=TEXT_COLOR, size=10),
+                colorbar=dict(tickfont=dict(color=TEXT_COLOR)),
+            )
+        )
+        fig.update_layout(**_base_layout(title or "Correlation heatmap"))
+        fig.update_xaxes(tickangle=-45)
 
-    return _fig_to_base64(fig)
+    return json.loads(fig.to_json())
 
 
 def suggest_chart_from_request(columns_info: list[dict], nl_request: str) -> dict:
@@ -211,14 +215,14 @@ def generate_dashboard(df: pd.DataFrame) -> list[dict]:
     results = []
     for cfg in charts_config[:6]:
         try:
-            image_b64 = generate_chart(
+            figure = generate_chart(
                 df,
                 chart_type=cfg["chart_type"],
                 x=cfg.get("x"),
                 y=cfg.get("y"),
                 title=cfg.get("title"),
             )
-            results.append({**cfg, "image_base64": image_b64})
+            results.append({**cfg, "figure": figure})
         except Exception:
             continue
 
