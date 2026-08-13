@@ -7,7 +7,12 @@ from pydantic import BaseModel
 
 from app.deps import get_current_user
 from app.services.datasets import get_dataset_dataframe
-from app.services.visualization import generate_chart, suggest_chart_from_request, generate_dashboard
+from app.services.visualization import (
+    generate_chart,
+    explain_chart,
+    suggest_multiple_charts_from_request,
+    generate_dashboard,
+)
 
 router = APIRouter(prefix="/viz", tags=["visualization"])
 
@@ -35,52 +40,75 @@ def _columns_info(df: pd.DataFrame) -> list[dict]:
     return info
 
 
-@router.post("/generate")
-async def generate(payload: GenerateRequest, user=Depends(get_current_user)):
-    df = get_dataset_dataframe(payload.dataset_id, user.id)
-
-    chart_type = payload.chart_type
-    x, y, agg, title = payload.x, payload.y, payload.agg, payload.title
-    interpreted = False
-    reasoning = None
-
-    if payload.nl_request and not chart_type:
-        try:
-            suggestion = await run_in_threadpool(
-                suggest_chart_from_request, _columns_info(df), payload.nl_request
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Could not interpret your request: {e}")
-
-        chart_type = suggestion.get("chart_type")
-        x = suggestion.get("x") or x
-        y = suggestion.get("y") or y
-        agg = suggestion.get("agg", agg)
-        title = suggestion.get("title", title)
-        reasoning = suggestion.get("reasoning")
-        interpreted = True
-
-    if not chart_type:
-        raise HTTPException(status_code=400, detail="chart_type or nl_request is required")
-
-    try:
-        figure = await run_in_threadpool(
-            generate_chart, df, chart_type, x, y, payload.color, agg, title
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Chart generation failed: {e}")
-
+def _build_one_chart(df: pd.DataFrame, chart_type: str, x, y, color, agg, title) -> dict:
+    figure = generate_chart(df, chart_type=chart_type, x=x, y=y, color=color, agg=agg, title=title)
+    insight = explain_chart(df, chart_type=chart_type, x=x, y=y, agg=agg)
     return {
         "chart_type": chart_type,
         "x": x,
         "y": y,
         "title": title,
         "figure": figure,
-        "interpreted": interpreted,
-        "reasoning": reasoning,
+        "insight": insight,
     }
+
+
+@router.post("/generate")
+async def generate(payload: GenerateRequest, user=Depends(get_current_user)):
+    """Always returns {"charts": [...]} - a single manually-built chart is a
+    1-item list; a natural-language request can return up to 3 charts if the
+    request genuinely calls for multiple angles on the data."""
+    df = get_dataset_dataframe(payload.dataset_id, user.id)
+
+    # ---------- Natural language path: can produce multiple charts ----------
+    if payload.nl_request and not payload.chart_type:
+        try:
+            suggestions = await run_in_threadpool(
+                suggest_multiple_charts_from_request, _columns_info(df), payload.nl_request
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Could not interpret your request: {e}")
+
+        if not suggestions:
+            raise HTTPException(status_code=500, detail="Could not come up with a chart for that request")
+
+        charts = []
+        for s in suggestions:
+            try:
+                chart = await run_in_threadpool(
+                    _build_one_chart,
+                    df,
+                    s.get("chart_type"),
+                    s.get("x"),
+                    s.get("y"),
+                    None,
+                    s.get("agg", "sum"),
+                    s.get("title"),
+                )
+                chart["reasoning"] = s.get("reasoning")
+                charts.append(chart)
+            except Exception:
+                continue
+
+        if not charts:
+            raise HTTPException(status_code=500, detail="Could not build any of the suggested charts")
+
+        return {"charts": charts, "interpreted": True}
+
+    # ---------- Manual path: exactly one chart ----------
+    if not payload.chart_type:
+        raise HTTPException(status_code=400, detail="chart_type or nl_request is required")
+
+    try:
+        chart = await run_in_threadpool(
+            _build_one_chart, df, payload.chart_type, payload.x, payload.y, payload.color, payload.agg, payload.title
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Chart generation failed: {e}")
+
+    return {"charts": [chart], "interpreted": False}
 
 
 @router.post("/dashboard")

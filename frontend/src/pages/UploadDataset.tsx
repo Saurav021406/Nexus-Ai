@@ -170,16 +170,13 @@ interface VizChart {
   y: string | null
   title: string
   figure: PlotlyFigure
+  insight?: string
+  reasoning?: string | null
 }
 
-interface VizGenerateResult {
-  chart_type: string
-  x: string | null
-  y: string | null
-  title: string | null
-  figure: PlotlyFigure
+interface VizGenerateResponse {
+  charts: VizChart[]
   interpreted: boolean
-  reasoning: string | null
 }
 
 export type WorkspaceTab = 'upload' | 'profile' | 'analysis' | 'chat' | 'forecast' | 'clean' | 'eda' | 'visualize' | 'history'
@@ -426,7 +423,7 @@ export default function UploadDataset({
   const [vizNlRequest, setVizNlRequest] = useState('')
   const [vizLoading, setVizLoading] = useState(false)
   const [vizError, setVizError] = useState<string | null>(null)
-  const [vizResult, setVizResult] = useState<VizGenerateResult | null>(null)
+  const [vizResult, setVizResult] = useState<VizGenerateResponse | null>(null)
   const [dashboardCharts, setDashboardCharts] = useState<VizChart[] | null>(null)
   const [dashboardLoading, setDashboardLoading] = useState(false)
   const [dashboardError, setDashboardError] = useState<string | null>(null)
@@ -859,6 +856,19 @@ export default function UploadDataset({
     } finally {
       setDeletingId(null)
     }
+  }
+
+  const [copiedChart, setCopiedChart] = useState<string | null>(null)
+
+  function handleShareChart(chart: VizChart, key: string) {
+    const summary = `${chart.title}${chart.insight ? `\n${chart.insight}` : ''}`
+    navigator.clipboard
+      .writeText(summary)
+      .then(() => {
+        setCopiedChart(key)
+        setTimeout(() => setCopiedChart((prev) => (prev === key ? null : prev)), 2000)
+      })
+      .catch(() => {})
   }
 
   async function handleGenerateChart(useNaturalLanguage: boolean) {
@@ -1825,7 +1835,10 @@ export default function UploadDataset({
                   <option value="histogram">Histogram</option>
                   <option value="bar">Bar</option>
                   <option value="line">Line</option>
+                  <option value="area">Area</option>
                   <option value="scatter">Scatter</option>
+                  <option value="pie">Pie</option>
+                  <option value="box">Box plot</option>
                   <option value="heatmap">Heatmap (correlation)</option>
                 </select>
               </div>
@@ -1846,7 +1859,7 @@ export default function UploadDataset({
                   </select>
                 </div>
               )}
-              {(vizChartType === 'bar' || vizChartType === 'line' || vizChartType === 'scatter') && (
+              {(vizChartType === 'bar' || vizChartType === 'line' || vizChartType === 'scatter' || vizChartType === 'area' || vizChartType === 'pie' || vizChartType === 'box') && (
                 <div>
                   <label className="block text-xs text-slate-400 mb-1">Y column</label>
                   <select
@@ -1902,18 +1915,37 @@ export default function UploadDataset({
           {vizError && <ErrorBanner message={vizError} />}
 
           {vizResult && (
-            <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4 space-y-2">
-              {vizResult.interpreted && vizResult.reasoning && (
-                <p className="text-xs text-purple-300">AI interpretation: {vizResult.reasoning}</p>
+            <div className="space-y-4">
+              {vizResult.charts.length > 1 && (
+                <p className="text-xs text-purple-300">
+                  Generated {vizResult.charts.length} charts for this request.
+                </p>
               )}
-              <Plot
-                data={vizResult.figure.data}
-                layout={{ ...vizResult.figure.layout, autosize: true }}
-                config={{ responsive: true, displaylogo: false }}
-                useResizeHandler
-                style={{ width: '100%', height: '420px' }}
-                className="rounded-lg border border-slate-800"
-              />
+              {vizResult.charts.map((chart, i) => (
+                <div key={i} className="rounded-xl border border-slate-800 bg-slate-950/30 p-4 space-y-2">
+                  {chart.reasoning && <p className="text-xs text-purple-300">AI interpretation: {chart.reasoning}</p>}
+                  <Plot
+                    data={chart.figure.data}
+                    layout={{ ...chart.figure.layout, autosize: true }}
+                    config={{
+                      responsive: true,
+                      displaylogo: false,
+                      displayModeBar: true,
+                      toImageButtonOptions: { format: 'png', filename: chart.title || 'chart' },
+                    }}
+                    useResizeHandler
+                    style={{ width: '100%', height: '420px' }}
+                    className="rounded-lg border border-slate-800"
+                  />
+                  {chart.insight && <p className="text-sm text-slate-300">{chart.insight}</p>}
+                  <button
+                    onClick={() => handleShareChart(chart, `result-${i}`)}
+                    className="text-xs text-slate-400 hover:text-slate-200"
+                  >
+                    {copiedChart === `result-${i}` ? 'Copied!' : 'Copy summary to share'}
+                  </button>
+                </div>
+              ))}
             </div>
           )}
 
@@ -1935,14 +1967,26 @@ export default function UploadDataset({
             {dashboardCharts && (
               <div className="grid gap-4 sm:grid-cols-2">
                 {dashboardCharts.map((chart, i) => (
-                  <div key={i} className="rounded-lg border border-slate-800 overflow-hidden">
+                  <div key={i} className="rounded-lg border border-slate-800 overflow-hidden p-2 space-y-2">
                     <Plot
                       data={chart.figure.data}
                       layout={{ ...chart.figure.layout, autosize: true }}
-                      config={{ responsive: true, displaylogo: false }}
+                      config={{
+                        responsive: true,
+                        displaylogo: false,
+                        displayModeBar: true,
+                        toImageButtonOptions: { format: 'png', filename: chart.title || 'chart' },
+                      }}
                       useResizeHandler
                       style={{ width: '100%', height: '340px' }}
                     />
+                    {chart.insight && <p className="text-xs text-slate-400 px-1">{chart.insight}</p>}
+                    <button
+                      onClick={() => handleShareChart(chart, `dash-${i}`)}
+                      className="text-xs text-slate-500 hover:text-slate-300 px-1"
+                    >
+                      {copiedChart === `dash-${i}` ? 'Copied!' : 'Copy summary to share'}
+                    </button>
                   </div>
                 ))}
               </div>
