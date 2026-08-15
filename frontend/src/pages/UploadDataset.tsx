@@ -74,6 +74,44 @@ interface AgentTrace {
   error?: string | null
 }
 
+interface ReportSection {
+  heading: string
+  body?: string
+  bullets?: string[]
+  recommendation?: string
+}
+
+interface ReportTimelineStep {
+  agent: string
+  role: string
+  detail: string
+}
+
+interface ReportChart {
+  title: string
+  image_base64: string
+}
+
+interface ReportContent {
+  title: string
+  subtitle?: string
+  dataset_id: string
+  filename: string
+  primary_domain: string
+  generated_at: string
+  executive_summary: string
+  agent_collaboration_narrative?: string
+  agent_timeline?: ReportTimelineStep[]
+  key_metrics: string[]
+  recommendation: string
+  sections: ReportSection[]
+  charts?: ReportChart[]
+  participating_agents: string[]
+  review?: AgentReview
+  security?: AgentSecurity
+  approval_status: string
+}
+
 interface AgentResult {
   classification: DomainResult
   summary: string
@@ -378,6 +416,13 @@ export default function UploadDataset({
   const [activeSpecialistTab, setActiveSpecialistTab] = useState<string | null>(null)
   const [showSystemDetails, setShowSystemDetails] = useState(false)
 
+  const [reportGenerating, setReportGenerating] = useState(false)
+  const [reportError, setReportError] = useState<string | null>(null)
+  const [reportContent, setReportContent] = useState<ReportContent | null>(null)
+  const [reportDownloading, setReportDownloading] = useState<'pdf' | 'docx' | null>(null)
+  const [reportEditingSummary, setReportEditingSummary] = useState(false)
+  const [showAgentDiscussion, setShowAgentDiscussion] = useState(false)
+
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [question, setQuestion] = useState('')
   const [asking, setAsking] = useState(false)
@@ -433,6 +478,10 @@ export default function UploadDataset({
     setDomainError(null)
     setAgentResult(null)
     setAgentError(null)
+    setReportContent(null)
+    setReportError(null)
+    setReportEditingSummary(false)
+    setShowAgentDiscussion(false)
     setMessages([])
     setChatError(null)
     setForecastColumns(null)
@@ -575,6 +624,74 @@ export default function UploadDataset({
       setAgentError((err as Error).message)
     } finally {
       setAnalyzing(false)
+    }
+  }
+
+  async function handleGenerateReport() {
+    if (!result || !agentResult || agentResult.error) return
+    setReportGenerating(true)
+    setReportError(null)
+    setReportContent(null)
+
+    try {
+      const headers = await authHeader()
+      const response = await fetch(`${API_BASE_URL}/report/generate`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataset_id: result.dataset_id,
+          filename: result.filename,
+          analysis: agentResult,
+        }),
+      })
+
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Report generation failed (${response.status})`)
+      }
+
+      setReportContent(await response.json())
+    } catch (err) {
+      setReportError((err as Error).message)
+    } finally {
+      setReportGenerating(false)
+    }
+  }
+
+  async function handleDownloadReport(format: 'pdf' | 'docx') {
+    if (!reportContent) return
+    setReportDownloading(format)
+    setReportError(null)
+
+    const approvedReport = { ...reportContent, approval_status: 'approved' }
+    setReportContent(approvedReport)
+
+    try {
+      const headers = await authHeader()
+      const response = await fetch(`${API_BASE_URL}/report/${format}`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ report: approvedReport }),
+      })
+
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Download failed (${response.status})`)
+      }
+
+      const blob = await response.blob()
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${reportContent.filename || 'report'}_report.${format}`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      window.URL.revokeObjectURL(url)
+    } catch (err) {
+      setReportError((err as Error).message)
+    } finally {
+      setReportDownloading(null)
     }
   }
 
@@ -1131,6 +1248,163 @@ export default function UploadDataset({
 
             {agentResult && !agentResult.error && (
               <div className="space-y-4">
+                {/* Report Agent */}
+                <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-100">Report Agent</p>
+                      <p className="text-xs text-slate-400">
+                        Turn this analysis into a shareable PDF or Word report.
+                      </p>
+                    </div>
+                    {!reportContent && (
+                      <button
+                        onClick={handleGenerateReport}
+                        disabled={reportGenerating}
+                        className="rounded-lg bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {reportGenerating ? 'Drafting report…' : 'Generate report'}
+                      </button>
+                    )}
+                  </div>
+
+                  {reportError && <ErrorBanner message={reportError} />}
+
+                  {reportContent && (
+                    <div className="mt-4 space-y-3 border-t border-slate-800 pt-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <span
+                          className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${
+                            reportContent.approval_status === 'approved'
+                              ? 'bg-emerald-950/40 text-emerald-300'
+                              : 'bg-amber-950/40 text-amber-300'
+                          }`}
+                        >
+                          {reportContent.approval_status === 'approved'
+                            ? 'Approved'
+                            : 'Pending approval — review before downloading'}
+                        </span>
+                        <button
+                          onClick={handleGenerateReport}
+                          disabled={reportGenerating}
+                          className="text-xs text-cyan-400 hover:text-cyan-300 disabled:opacity-50"
+                        >
+                          {reportGenerating ? 'Regenerating…' : 'Regenerate'}
+                        </button>
+                      </div>
+
+                      {/* Editable executive summary */}
+                      <div className="rounded-lg bg-slate-950/60 p-3">
+                        <div className="mb-1 flex items-center justify-between">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                            Executive summary
+                          </p>
+                          <button
+                            onClick={() => setReportEditingSummary((v) => !v)}
+                            className="text-xs text-cyan-400 hover:text-cyan-300"
+                          >
+                            {reportEditingSummary ? 'Done editing' : 'Edit'}
+                          </button>
+                        </div>
+                        {reportEditingSummary ? (
+                          <textarea
+                            value={reportContent.executive_summary}
+                            onChange={(e) =>
+                              setReportContent({
+                                ...reportContent,
+                                executive_summary: e.target.value,
+                                approval_status: 'pending',
+                              })
+                            }
+                            rows={4}
+                            className="w-full rounded-md border border-slate-700 bg-slate-900 p-2 text-sm text-slate-100 focus:border-cyan-600 focus:outline-none"
+                          />
+                        ) : (
+                          <p className="text-sm text-slate-200">{reportContent.executive_summary}</p>
+                        )}
+                      </div>
+
+                      {/* Agent discussion panel */}
+                      {reportContent.agent_collaboration_narrative && (
+                        <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3">
+                          <button
+                            onClick={() => setShowAgentDiscussion((v) => !v)}
+                            className="flex w-full items-center justify-between text-left"
+                          >
+                            <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                              How the agents reached this conclusion
+                            </p>
+                            <span className="text-xs text-cyan-400">
+                              {showAgentDiscussion ? 'Hide' : 'Show'}
+                            </span>
+                          </button>
+                          {showAgentDiscussion && (
+                            <div className="mt-3 space-y-3">
+                              <p className="text-sm text-slate-300">
+                                {reportContent.agent_collaboration_narrative}
+                              </p>
+                              {reportContent.agent_timeline && reportContent.agent_timeline.length > 0 && (
+                                <ol className="space-y-2 border-l border-slate-800 pl-4">
+                                  {reportContent.agent_timeline.map((step, i) => (
+                                    <li key={i} className="relative">
+                                      <span className="absolute -left-[21px] top-1 h-2 w-2 rounded-full bg-cyan-500" />
+                                      <p className="text-xs font-semibold text-cyan-300">
+                                        {step.agent}
+                                        <span className="ml-2 font-normal text-slate-500">{step.role}</span>
+                                      </p>
+                                      <p className="text-xs text-slate-400">{step.detail}</p>
+                                    </li>
+                                  ))}
+                                </ol>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Chart previews */}
+                      {reportContent.charts && reportContent.charts.length > 0 && (
+                        <div>
+                          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
+                            Charts included in this report
+                          </p>
+                          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                            {reportContent.charts.map((chart, i) => (
+                              <div key={i} className="overflow-hidden rounded-lg border border-slate-800">
+                                <img
+                                  src={`data:image/png;base64,${chart.image_base64}`}
+                                  alt={chart.title}
+                                  className="w-full"
+                                />
+                                <p className="bg-slate-950/60 px-2 py-1 text-center text-[11px] text-slate-400">
+                                  {chart.title}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          onClick={() => handleDownloadReport('pdf')}
+                          disabled={reportDownloading !== null}
+                          className="rounded-lg border border-cyan-700 px-4 py-2 text-sm font-medium text-cyan-300 hover:bg-cyan-950/40 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {reportDownloading === 'pdf' ? 'Downloading…' : 'Approve & download PDF'}
+                        </button>
+                        <button
+                          onClick={() => handleDownloadReport('docx')}
+                          disabled={reportDownloading !== null}
+                          className="rounded-lg border border-cyan-700 px-4 py-2 text-sm font-medium text-cyan-300 hover:bg-cyan-950/40 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {reportDownloading === 'docx' ? 'Downloading…' : 'Approve & download Word'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
                 {/* Key AI recommendation callout */}
                 {agentResult.recommendation && (
                   <div className="rounded-xl border border-cyan-800/60 bg-cyan-950/20 p-4">
