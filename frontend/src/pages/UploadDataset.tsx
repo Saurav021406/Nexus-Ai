@@ -109,8 +109,16 @@ interface ReportContent {
   participating_agents: string[]
   review?: AgentReview
   security?: AgentSecurity
-  approval_status: string
+  approval_status: 'pending' | 'approved' | 'rejected'
+  id: string
+  version_number: number
+  rejection_reason?: string | null
 }
+
+interface ReportVersion extends ReportContent {
+  created_at?: string
+}
+
 
 interface AgentResult {
   classification: DomainResult
@@ -422,6 +430,12 @@ export default function UploadDataset({
   const [reportDownloading, setReportDownloading] = useState<'pdf' | 'docx' | null>(null)
   const [reportEditingSummary, setReportEditingSummary] = useState(false)
   const [showAgentDiscussion, setShowAgentDiscussion] = useState(false)
+  const [reportVersions, setReportVersions] = useState<ReportVersion[]>([])
+  const [showVersionHistory, setShowVersionHistory] = useState(false)
+  const [versionsLoading, setVersionsLoading] = useState(false)
+  const [showRejectForm, setShowRejectForm] = useState(false)
+  const [rejectReason, setRejectReason] = useState('')
+  const [reportActionLoading, setReportActionLoading] = useState<'approve' | 'reject' | 'resubmit' | null>(null)
 
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [question, setQuestion] = useState('')
@@ -632,6 +646,8 @@ export default function UploadDataset({
     setReportGenerating(true)
     setReportError(null)
     setReportContent(null)
+    setShowRejectForm(false)
+    setRejectReason('')
 
     try {
       const headers = await authHeader()
@@ -650,7 +666,9 @@ export default function UploadDataset({
         throw new Error(errBody.detail || `Report generation failed (${response.status})`)
       }
 
-      setReportContent(await response.json())
+      const generated: ReportContent = await response.json()
+      setReportContent(generated)
+      setReportVersions((prev) => [generated, ...prev])
     } catch (err) {
       setReportError((err as Error).message)
     } finally {
@@ -658,20 +676,113 @@ export default function UploadDataset({
     }
   }
 
-  async function handleDownloadReport(format: 'pdf' | 'docx') {
+  async function handleApproveReport() {
     if (!reportContent) return
+    setReportActionLoading('approve')
+    setReportError(null)
+    try {
+      const headers = await authHeader()
+      const response = await fetch(`${API_BASE_URL}/report/${reportContent.id}/approve`, {
+        method: 'POST',
+        headers,
+      })
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Approve failed (${response.status})`)
+      }
+      const updated: ReportContent = await response.json()
+      setReportContent(updated)
+      setReportVersions((prev) => prev.map((v) => (v.id === updated.id ? updated : v)))
+    } catch (err) {
+      setReportError((err as Error).message)
+    } finally {
+      setReportActionLoading(null)
+    }
+  }
+
+  async function handleRejectReport() {
+    if (!reportContent || !rejectReason.trim()) return
+    setReportActionLoading('reject')
+    setReportError(null)
+    try {
+      const headers = await authHeader()
+      const response = await fetch(`${API_BASE_URL}/report/${reportContent.id}/reject`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: rejectReason.trim() }),
+      })
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Reject failed (${response.status})`)
+      }
+      const updated: ReportContent = await response.json()
+      setReportContent(updated)
+      setReportVersions((prev) => prev.map((v) => (v.id === updated.id ? updated : v)))
+      setShowRejectForm(false)
+      setRejectReason('')
+    } catch (err) {
+      setReportError((err as Error).message)
+    } finally {
+      setReportActionLoading(null)
+    }
+  }
+
+  async function handleResubmitReport() {
+    if (!reportContent) return
+    setReportActionLoading('resubmit')
+    setReportError(null)
+    try {
+      const headers = await authHeader()
+      const response = await fetch(`${API_BASE_URL}/report/${reportContent.id}/resubmit`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ executive_summary: reportContent.executive_summary }),
+      })
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Resubmit failed (${response.status})`)
+      }
+      const updated: ReportContent = await response.json()
+      setReportContent(updated)
+      setReportVersions((prev) => [updated, ...prev])
+      setReportEditingSummary(false)
+    } catch (err) {
+      setReportError((err as Error).message)
+    } finally {
+      setReportActionLoading(null)
+    }
+  }
+
+  async function handleLoadVersionHistory() {
+    if (!result) return
+    setVersionsLoading(true)
+    try {
+      const headers = await authHeader()
+      const response = await fetch(
+        `${API_BASE_URL}/report/versions?dataset_id=${encodeURIComponent(result.dataset_id)}`,
+        { headers }
+      )
+      if (!response.ok) throw new Error('Could not load version history')
+      const data = await response.json()
+      setReportVersions(data.versions || [])
+    } catch (err) {
+      setReportError((err as Error).message)
+    } finally {
+      setVersionsLoading(false)
+    }
+  }
+
+  async function handleDownloadReport(format: 'pdf' | 'docx') {
+    if (!reportContent || reportContent.approval_status !== 'approved') return
     setReportDownloading(format)
     setReportError(null)
-
-    const approvedReport = { ...reportContent, approval_status: 'approved' }
-    setReportContent(approvedReport)
 
     try {
       const headers = await authHeader()
       const response = await fetch(`${API_BASE_URL}/report/${format}`, {
         method: 'POST',
         headers: { ...headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ report: approvedReport }),
+        body: JSON.stringify({ report: reportContent, report_id: reportContent.id }),
       })
 
       if (!response.ok) {
@@ -1272,25 +1383,25 @@ export default function UploadDataset({
 
                   {reportContent && (
                     <div className="mt-4 space-y-3 border-t border-slate-800 pt-4">
-                      <div className="flex items-center justify-between gap-3">
-                        <span
-                          className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${
-                            reportContent.approval_status === 'approved'
-                              ? 'bg-emerald-950/40 text-emerald-300'
-                              : 'bg-amber-950/40 text-amber-300'
-                          }`}
-                        >
-                          {reportContent.approval_status === 'approved'
-                            ? 'Approved'
-                            : 'Pending approval — review before downloading'}
-                        </span>
-                        <button
-                          onClick={handleGenerateReport}
-                          disabled={reportGenerating}
-                          className="text-xs text-cyan-400 hover:text-cyan-300 disabled:opacity-50"
-                        >
-                          {reportGenerating ? 'Regenerating…' : 'Regenerate'}
-                        </button>
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${
+                              reportContent.approval_status === 'approved'
+                                ? 'bg-emerald-950/40 text-emerald-300'
+                                : reportContent.approval_status === 'rejected'
+                                  ? 'bg-red-950/40 text-red-300'
+                                  : 'bg-amber-950/40 text-amber-300'
+                            }`}
+                          >
+                            {reportContent.approval_status === 'approved'
+                              ? 'Approved'
+                              : reportContent.approval_status === 'rejected'
+                                ? 'Rejected'
+                                : 'Pending approval'}
+                          </span>
+                          <span className="text-xs text-slate-500">Version {reportContent.version_number}</span>
+                        </div>
                       </div>
 
                       {/* Editable executive summary */}
@@ -1313,7 +1424,6 @@ export default function UploadDataset({
                               setReportContent({
                                 ...reportContent,
                                 executive_summary: e.target.value,
-                                approval_status: 'pending',
                               })
                             }
                             rows={4}
@@ -1385,21 +1495,155 @@ export default function UploadDataset({
                         </div>
                       )}
 
-                      <div className="flex flex-wrap gap-2">
+                      {/* ---- Approval dashboard ---- */}
+                      <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3 space-y-3">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                          Approval
+                        </p>
+
+                        {reportContent.approval_status === 'pending' && !showRejectForm && (
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              onClick={handleApproveReport}
+                              disabled={reportActionLoading !== null}
+                              className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              {reportActionLoading === 'approve' ? 'Approving…' : 'Approve'}
+                            </button>
+                            <button
+                              onClick={() => setShowRejectForm(true)}
+                              disabled={reportActionLoading !== null}
+                              className="rounded-lg border border-red-800 px-4 py-2 text-sm font-medium text-red-300 hover:bg-red-950/40 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              Reject
+                            </button>
+                          </div>
+                        )}
+
+                        {reportContent.approval_status === 'pending' && showRejectForm && (
+                          <div className="space-y-2">
+                            <textarea
+                              value={rejectReason}
+                              onChange={(e) => setRejectReason(e.target.value)}
+                              placeholder="Why is this report being rejected?"
+                              rows={3}
+                              className="w-full rounded-md border border-red-900 bg-slate-900 p-2 text-sm text-slate-100 focus:border-red-600 focus:outline-none"
+                            />
+                            <div className="flex flex-wrap gap-2">
+                              <button
+                                onClick={handleRejectReport}
+                                disabled={reportActionLoading !== null || !rejectReason.trim()}
+                                className="rounded-lg bg-red-700 px-4 py-2 text-sm font-medium text-white hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                {reportActionLoading === 'reject' ? 'Submitting…' : 'Submit rejection'}
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setShowRejectForm(false)
+                                  setRejectReason('')
+                                }}
+                                className="rounded-lg border border-slate-700 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-800"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        {reportContent.approval_status === 'rejected' && (
+                          <div className="space-y-3">
+                            {reportContent.rejection_reason && (
+                              <p className="rounded-md border border-red-900 bg-red-950/30 p-2 text-xs text-red-200">
+                                <span className="font-semibold">Reason: </span>
+                                {reportContent.rejection_reason}
+                              </p>
+                            )}
+                            <div className="flex flex-wrap gap-2">
+                              <button
+                                onClick={handleGenerateReport}
+                                disabled={reportGenerating || reportActionLoading !== null}
+                                className="rounded-lg bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                {reportGenerating ? 'Regenerating…' : 'Regenerate report'}
+                              </button>
+                              <button
+                                onClick={handleResubmitReport}
+                                disabled={reportActionLoading !== null}
+                                className="rounded-lg border border-cyan-700 px-4 py-2 text-sm font-medium text-cyan-300 hover:bg-cyan-950/40 disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                {reportActionLoading === 'resubmit'
+                                  ? 'Resubmitting…'
+                                  : 'Resubmit edited summary for approval'}
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        {reportContent.approval_status === 'approved' && (
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              onClick={() => handleDownloadReport('pdf')}
+                              disabled={reportDownloading !== null}
+                              className="rounded-lg border border-cyan-700 px-4 py-2 text-sm font-medium text-cyan-300 hover:bg-cyan-950/40 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              {reportDownloading === 'pdf' ? 'Downloading…' : 'Download PDF'}
+                            </button>
+                            <button
+                              onClick={() => handleDownloadReport('docx')}
+                              disabled={reportDownloading !== null}
+                              className="rounded-lg border border-cyan-700 px-4 py-2 text-sm font-medium text-cyan-300 hover:bg-cyan-950/40 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              {reportDownloading === 'docx' ? 'Downloading…' : 'Download Word'}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* ---- Version history ---- */}
+                      <div className="rounded-lg border border-slate-800 bg-slate-950/40">
                         <button
-                          onClick={() => handleDownloadReport('pdf')}
-                          disabled={reportDownloading !== null}
-                          className="rounded-lg border border-cyan-700 px-4 py-2 text-sm font-medium text-cyan-300 hover:bg-cyan-950/40 disabled:cursor-not-allowed disabled:opacity-60"
+                          onClick={() => {
+                            const next = !showVersionHistory
+                            setShowVersionHistory(next)
+                            if (next) handleLoadVersionHistory()
+                          }}
+                          className="flex w-full items-center justify-between px-3 py-2 text-left"
                         >
-                          {reportDownloading === 'pdf' ? 'Downloading…' : 'Approve & download PDF'}
+                          <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                            Version history
+                          </p>
+                          <span className="text-xs text-cyan-400">{showVersionHistory ? 'Hide' : 'Show'}</span>
                         </button>
-                        <button
-                          onClick={() => handleDownloadReport('docx')}
-                          disabled={reportDownloading !== null}
-                          className="rounded-lg border border-cyan-700 px-4 py-2 text-sm font-medium text-cyan-300 hover:bg-cyan-950/40 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          {reportDownloading === 'docx' ? 'Downloading…' : 'Approve & download Word'}
-                        </button>
+                        {showVersionHistory && (
+                          <div className="space-y-2 border-t border-slate-800 p-3">
+                            {versionsLoading && <p className="text-xs text-slate-500">Loading…</p>}
+                            {!versionsLoading && reportVersions.length === 0 && (
+                              <p className="text-xs text-slate-500">No versions yet.</p>
+                            )}
+                            {reportVersions.map((v) => (
+                              <button
+                                key={v.id}
+                                onClick={() => setReportContent(v)}
+                                className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs hover:bg-slate-900 ${
+                                  v.id === reportContent.id ? 'bg-slate-900' : ''
+                                }`}
+                              >
+                                <span className="text-slate-300">Version {v.version_number}</span>
+                                <span
+                                  className={`rounded-full px-2 py-0.5 font-medium ${
+                                    v.approval_status === 'approved'
+                                      ? 'bg-emerald-950/40 text-emerald-300'
+                                      : v.approval_status === 'rejected'
+                                        ? 'bg-red-950/40 text-red-300'
+                                        : 'bg-amber-950/40 text-amber-300'
+                                  }`}
+                                >
+                                  {v.approval_status}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </div>
                   )}
