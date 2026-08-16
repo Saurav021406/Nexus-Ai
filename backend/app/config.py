@@ -8,7 +8,9 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173"
     openai_api_key: str = ""
     gemini_api_key: str = ""
-    nvidia_api_key: str = "" 
+    nvidia_api_key: str = ""
+    groq_api_key: str = ""
+    openrouter_api_key: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
