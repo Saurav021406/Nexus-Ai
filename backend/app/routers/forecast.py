@@ -3,7 +3,7 @@
 Deliberately kept simple and explainable: linear regression over row order
 (or a detected date column), reported with an R^2 score so the user can see
 how reliable the trend fit is. No LLM involved here - these are Python-computed
-predictions, unlike the Gemini-based analysis/chat features.
+predictions, unlike the Consensus-Engine-based analysis/chat features.
 """
 
 import numpy as np

@@ -5,20 +5,13 @@ routing: "primary_domain -> one specialist") is untouched and still powers
 the existing /domain/analyze endpoint and "AI analysis" tab exactly as
 before.
 
-manager_v2 is the first step toward Section 10's target architecture: a
-Manager that reasons over the actual user_query (not just a pre-computed
-domain label) and produces a structured, dependency-aware plan (Section 11's
-JSON shape), then still uses the existing domain specialists to execute it.
-
-Scope note (Steps 1-6 of the spec's Section 41 implementation order): this
-module builds the Manager Agent itself. It does NOT yet include:
-  - a standalone Task Planner module (Section 13 / Step 7)
-  - a real dependency-respecting Task Executor (Section 14 / Step 8)
-Task execution below runs every planned task concurrently, same as the
-original manager.py. The plan's `depends_on` metadata is captured and
-stored in state.tasks so the future Task Executor can consume it - but
-nothing enforces it yet. This is called out explicitly rather than silently
-half-implementing dependency ordering.
+manager_v2 is the Section 10 target architecture wired together: the
+Manager Agent reasons over the actual user_query and produces a structured
+plan, the Task Planner (agents/planner.py) validates it and orders it into
+dependency-respecting waves, and the Task Executor (agents/executor.py)
+actually runs it - concurrent within a wave, sequential across waves,
+with retry/timeout/skip handling. This closes the gap explicitly flagged
+in Steps 1-6: depends_on is now enforced, not just recorded.
 """
 
 from __future__ import annotations
@@ -30,9 +23,11 @@ from typing import Any
 from agents import Agent, Runner
 from pydantic import BaseModel, Field
 
+from app.agents.executor import execute_plan
 from app.agents.model_provider import get_nexus_model
+from app.agents.planner import validate_and_order_plan
 from app.agents.quality import quality_check
-from app.agents.registry import get_agent, list_capabilities
+from app.agents.registry import get_agent, available_agent_domains, list_capabilities
 from app.agents.state import WorkflowState
 from app.agents.tracing import add_trace
 
@@ -121,43 +116,48 @@ async def run_manager_v2(state: WorkflowState) -> WorkflowState:
         )
 
     state.goal = agent_plan.goal
-    state.tasks = [t.model_dump() for t in agent_plan.tasks]
     state.plan = [
         {"step": i + 1, "agent": t.agent, "task": t.task} for i, t in enumerate(agent_plan.tasks)
     ]
-    add_trace(state, "Manager", "plan_created", output_data={"goal": state.goal, "tasks": state.tasks})
+    add_trace(
+        state, "Manager", "plan_created",
+        output_data={"goal": state.goal, "tasks": [t.model_dump() for t in agent_plan.tasks]},
+    )
 
-    # ---------- 2. Delegation ----------
-    # NOTE: runs every task concurrently regardless of depends_on - see module
-    # docstring. A real dependency-respecting executor is the next step.
-    async def run_one(task: PlannedTask) -> tuple[str, dict]:
-        agent_fn = get_agent(task.agent)
+    # ---------- 2. Task Planning (validate + order into dependency waves) ----------
+    plan_result = validate_and_order_plan(agent_plan.tasks, available_agent_domains())
+
+    if not plan_result.valid:
+        state.add_error("Planner", "; ".join(plan_result.errors))
+        add_trace(state, "Planner", "validation_failed", error="; ".join(plan_result.errors))
+        # Same safety net as a planning failure: fall back to one task on
+        # the detected primary domain rather than failing the whole request.
+        fallback_domain = state.classification.get("primary_domain", "General")
+        plan_result = validate_and_order_plan(
+            [PlannedTask(id="t1", agent=fallback_domain, task="full_analysis", depends_on=[])],
+            available_agent_domains(),
+        )
+
+    add_trace(
+        state, "Planner", "plan_ordered",
+        output_data={"wave_count": len(plan_result.waves), "waves": [
+            [t["id"] for t in wave] for wave in plan_result.waves
+        ]},
+    )
+
+    # ---------- 3. Task Execution (dependency-respecting, wave by wave) ----------
+    async def run_specialist_task(task: dict, state: WorkflowState) -> dict:
+        agent_fn = get_agent(task["agent"])
         if not agent_fn:
-            result = {"error": f"{task.agent} specialist is not installed"}
-            add_trace(state, task.agent, "missing", error=result["error"])
-            return task.agent, result
-        try:
-            output = await asyncio.to_thread(agent_fn, state.data_summary)
-            if not isinstance(output, dict):
-                output = {"error": "Specialist returned invalid format"}
-            add_trace(state, task.agent, "completed", output_data=output)
-            return task.agent, output
-        except Exception as e:
-            output = {"error": f"Specialist failed: {str(e)}"}
-            add_trace(state, task.agent, "failed", error=str(e))
-            return task.agent, output
+            return {"error": f"{task['agent']} specialist is not installed"}
+        output = await asyncio.to_thread(agent_fn, state.data_summary)
+        if not isinstance(output, dict):
+            return {"error": "Specialist returned invalid format"}
+        return output
 
-    if not agent_plan.tasks:
-        state.add_error("Manager", "Plan produced no tasks")
-    else:
-        results = await asyncio.gather(*(run_one(t) for t in agent_plan.tasks))
-        state.specialist_results = {domain: report for domain, report in results}
+    await execute_plan(state, plan_result.waves, run_specialist_task)
 
-        for task in state.tasks:
-            domain = task["agent"]
-            task["status"] = "failed" if "error" in state.specialist_results.get(domain, {}) else "completed"
-
-    # ---------- 3. Reviewer + Security (reuses the existing quality_check -
+    # ---------- 4. Reviewer + Security (reuses the existing quality_check -
     # separating these into two independent agents is a later step) ----------
     try:
         quality = await asyncio.to_thread(quality_check, state)
@@ -179,7 +179,7 @@ async def run_manager_v2(state: WorkflowState) -> WorkflowState:
         }
         add_trace(state, "Quality", "failed", error=str(e))
 
-    # ---------- 4. Final synthesis ----------
+    # ---------- 5. Final synthesis ----------
     state.final_output = _synthesize(state)
     state.status = "completed" if not state.errors else "completed_with_errors"
     state.touch()

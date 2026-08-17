@@ -9,8 +9,9 @@ security, plan, traces) and produces structured, human-readable report content:
     since that data already exists exactly as it happened)
   - per-specialist sections
 
-Both narratives come from a single LLM call (NVIDIA primary, Gemini fallback)
-to keep quota use in line with the rest of this codebase's agents. Both are
+Both narratives come from a single call to the Consensus Engine (Groq +
+NVIDIA Nemotron + Claude queried in parallel, merged with agreement/
+contradiction detection - see app/services/consensus.py). Both are
 strictly grounded in the analysis JSON - the prompt forbids inventing new
 numbers or claims.
 
@@ -25,17 +26,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-import google.generativeai as genai
-from openai import OpenAI
-
-from app.config import settings
-
-genai.configure(api_key=settings.gemini_api_key)
-
-nvidia_client = OpenAI(
-    base_url="https://integrate.api.nvidia.com/v1",
-    api_key=settings.nvidia_api_key,
-)
+from app.services.consensus import get_consensus_json
 
 # reportlab's default PDF font (Helvetica/WinAnsi) can't render some "smart"
 # Unicode punctuation that LLMs like to use (en/em dashes, curly quotes,
@@ -188,34 +179,10 @@ Respond ONLY with this exact JSON shape (no markdown, no extra text):
 
 
 def _call_llm(prompt: str) -> dict | None:
-    text = None
     try:
-        completion = nvidia_client.chat.completions.create(
-            model="nvidia/nemotron-3-super-120b-a12b",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            top_p=0.95,
-            max_tokens=768,
-        )
-        text = completion.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"NVIDIA failed in report agent: {e}")
-
-    if not text:
-        try:
-            model = genai.GenerativeModel("gemini-3-flash-preview")
-            response = model.generate_content(prompt)
-            text = response.text.strip()
-        except Exception as e:
-            print(f"Gemini failed in report agent: {e}")
-
-    if not text:
-        return None
-
-    text = text.replace("```json", "").replace("```", "").strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
+        return get_consensus_json(prompt, temperature=0.7, max_tokens=768)
+    except (RuntimeError, json.JSONDecodeError) as e:
+        print(f"Consensus engine failed in report agent: {e}")
         return None
 
 

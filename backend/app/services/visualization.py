@@ -13,11 +13,8 @@ import json
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import google.generativeai as genai
 
-from app.config import settings
-
-genai.configure(api_key=settings.gemini_api_key)
+from app.services.consensus import get_consensus_json
 
 VALID_CHART_TYPES = {"histogram", "bar", "line", "scatter", "heatmap", "pie", "box", "area"}
 
@@ -289,9 +286,10 @@ def explain_chart(
 
 
 def suggest_multiple_charts_from_request(columns_info: list[dict], nl_request: str) -> list[dict]:
-    """Uses Gemini to translate a natural-language request into one or more
-    chart specs - a single query like 'show me sales trends' can reasonably
-    map to 2-3 complementary charts. Python still does all the actual
+    """Uses the Consensus Engine (Groq + NVIDIA Nemotron + Claude) to
+    translate a natural-language request into one or more chart specs - a
+    single query like 'show me sales trends' can reasonably map to 2-3
+    complementary charts. Python still does all the actual
     rendering/computation - the AI only decides WHAT to chart."""
     prompt = f"""You are a data visualization assistant. A user described what they
 want to see in plain language. Based on the available columns below, decide
@@ -319,10 +317,7 @@ of 1 to 3 chart specs:
   ]
 }}"""
 
-    model = genai.GenerativeModel("gemini-3-flash-preview")
-    response = model.generate_content(prompt)
-    text = response.text.strip().replace("```json", "").replace("```", "").strip()
-    parsed = json.loads(text)
+    parsed = get_consensus_json(prompt, temperature=0.7, max_tokens=1024)
     return parsed.get("charts", [])[:3]
 
 
