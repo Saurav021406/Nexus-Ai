@@ -24,6 +24,7 @@ from agents import Agent, Runner
 from pydantic import BaseModel, Field
 
 from app.agents.executor import execute_plan
+from app.agents.events import EventEmitter, NOOP_EMIT
 from app.agents.model_provider import get_nexus_model
 from app.agents.planner import validate_and_order_plan
 from app.agents.quality import quality_check
@@ -90,13 +91,18 @@ AVAILABLE AGENTS:
 """
 
 
-async def run_manager_v2(state: WorkflowState) -> WorkflowState:
+async def run_manager_v2(state: WorkflowState, emit: EventEmitter = NOOP_EMIT) -> WorkflowState:
     """Entry point for the new intent-aware path. Mirrors run_manager()'s
     overall shape (plan -> delegate -> quality check -> synthesize) so the
     two paths stay easy to compare, but the plan now comes from real
-    reasoning over state.user_query instead of a domain lookup."""
+    reasoning over state.user_query instead of a domain lookup.
+
+    `emit` is optional live-progress reporting (Section 30) - defaults to a
+    no-op, so calling this without a frontend watching behaves identically
+    to before."""
 
     add_trace(state, "Manager", "start", input_data={"user_query": state.user_query})
+    await emit("manager_start", "Manager", "Understanding your request...", None)
 
     # ---------- 1. Planning ----------
     manager_agent = _build_manager_agent()
@@ -106,6 +112,7 @@ async def run_manager_v2(state: WorkflowState) -> WorkflowState:
     except Exception as e:
         state.add_error("Manager", f"Planning failed: {e}")
         add_trace(state, "Manager", "planning_failed", error=str(e))
+        await emit("manager_planning_failed", "Manager", "Planning failed, using fallback plan", {"error": str(e)})
         # Safe fallback: fall back to the primary detected domain as a single task,
         # so a planning-model hiccup doesn't take down the whole request.
         fallback_domain = state.classification.get("primary_domain", "General")
@@ -123,6 +130,8 @@ async def run_manager_v2(state: WorkflowState) -> WorkflowState:
         state, "Manager", "plan_created",
         output_data={"goal": state.goal, "tasks": [t.model_dump() for t in agent_plan.tasks]},
     )
+    await emit("plan_created", "Manager", f"Plan: {state.goal}",
+                {"tasks": [t.model_dump() for t in agent_plan.tasks]})
 
     # ---------- 2. Task Planning (validate + order into dependency waves) ----------
     plan_result = validate_and_order_plan(agent_plan.tasks, available_agent_domains())
@@ -130,6 +139,8 @@ async def run_manager_v2(state: WorkflowState) -> WorkflowState:
     if not plan_result.valid:
         state.add_error("Planner", "; ".join(plan_result.errors))
         add_trace(state, "Planner", "validation_failed", error="; ".join(plan_result.errors))
+        await emit("planner_validation_failed", "Planner", "Plan invalid, using fallback",
+                    {"errors": plan_result.errors})
         # Same safety net as a planning failure: fall back to one task on
         # the detected primary domain rather than failing the whole request.
         fallback_domain = state.classification.get("primary_domain", "General")
@@ -144,6 +155,8 @@ async def run_manager_v2(state: WorkflowState) -> WorkflowState:
             [t["id"] for t in wave] for wave in plan_result.waves
         ]},
     )
+    await emit("plan_ordered", "Planner", f"Ordered into {len(plan_result.waves)} execution wave(s)",
+                {"waves": [[t["id"] for t in wave] for wave in plan_result.waves]})
 
     # ---------- 3. Task Execution (dependency-respecting, wave by wave) ----------
     async def run_specialist_task(task: dict, state: WorkflowState) -> dict:
@@ -155,15 +168,17 @@ async def run_manager_v2(state: WorkflowState) -> WorkflowState:
             return {"error": "Specialist returned invalid format"}
         return output
 
-    await execute_plan(state, plan_result.waves, run_specialist_task)
+    await execute_plan(state, plan_result.waves, run_specialist_task, emit)
 
     # ---------- 4. Reviewer + Security (reuses the existing quality_check -
     # separating these into two independent agents is a later step) ----------
+    await emit("quality_check_start", "Quality", "Running reviewer and security checks...", None)
     try:
         quality = await asyncio.to_thread(quality_check, state)
         state.review = quality.get("review")
         state.security = quality.get("security")
         add_trace(state, "Quality", "completed", output_data=quality)
+        await emit("quality_check_completed", "Quality", "Quality checks complete", quality)
     except Exception as e:
         state.review = {
             "overall_quality": "medium",
@@ -178,12 +193,14 @@ async def run_manager_v2(state: WorkflowState) -> WorkflowState:
             "safe_to_show": True,
         }
         add_trace(state, "Quality", "failed", error=str(e))
+        await emit("quality_check_failed", "Quality", "Quality checks failed, using safe defaults", {"error": str(e)})
 
     # ---------- 5. Final synthesis ----------
     state.final_output = _synthesize(state)
     state.status = "completed" if not state.errors else "completed_with_errors"
     state.touch()
     add_trace(state, "Manager", "finished")
+    await emit("finished", "Manager", "Done", {"status": state.status})
 
     return state
 

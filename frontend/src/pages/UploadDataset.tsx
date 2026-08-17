@@ -120,6 +120,27 @@ interface ReportVersion extends ReportContent {
 }
 
 
+interface AgentStreamEvent {
+  type: string
+  agent: string
+  message: string
+  data?: Record<string, unknown> | null
+  timestamp: number
+}
+
+interface AgentStreamDone {
+  type: '__done__'
+  workflow_id: string
+  status: string
+  result: {
+    summary?: string
+    recommendation?: string
+    key_metrics?: string[]
+    participating_agents?: string[]
+    goal?: string
+  }
+}
+
 interface AgentResult {
   classification: DomainResult
   summary: string
@@ -225,7 +246,7 @@ interface VizGenerateResponse {
   interpreted: boolean
 }
 
-export type WorkspaceTab = 'upload' | 'profile' | 'analysis' | 'chat' | 'forecast' | 'clean' | 'eda' | 'visualize' | 'history'
+export type WorkspaceTab = 'upload' | 'profile' | 'analysis' | 'agent' | 'chat' | 'forecast' | 'clean' | 'eda' | 'visualize' | 'history'
 
 interface UploadDatasetProps {
   activeTab: WorkspaceTab
@@ -430,6 +451,12 @@ export default function UploadDataset({
   const [reportDownloading, setReportDownloading] = useState<'pdf' | 'docx' | null>(null)
   const [reportEditingSummary, setReportEditingSummary] = useState(false)
   const [showAgentDiscussion, setShowAgentDiscussion] = useState(false)
+
+  const [agentQuery, setAgentQuery] = useState('')
+  const [agentStreamRunning, setAgentStreamRunning] = useState(false)
+  const [agentStreamEvents, setAgentStreamEvents] = useState<AgentStreamEvent[]>([])
+  const [agentStreamResult, setAgentStreamResult] = useState<AgentStreamDone | null>(null)
+  const [agentStreamError, setAgentStreamError] = useState<string | null>(null)
   const [reportVersions, setReportVersions] = useState<ReportVersion[]>([])
   const [showVersionHistory, setShowVersionHistory] = useState(false)
   const [versionsLoading, setVersionsLoading] = useState(false)
@@ -638,6 +665,60 @@ export default function UploadDataset({
       setAgentError((err as Error).message)
     } finally {
       setAnalyzing(false)
+    }
+  }
+
+  async function handleRunAgentStream() {
+    if (!result || !agentQuery.trim()) return
+    setAgentStreamRunning(true)
+    setAgentStreamEvents([])
+    setAgentStreamResult(null)
+    setAgentStreamError(null)
+
+    try {
+      const headers = await authHeader()
+      const response = await fetch(`${API_BASE_URL}/agent/run/stream`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: agentQuery.trim(), dataset_id: result.dataset_id }),
+      })
+
+      if (!response.ok || !response.body) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Failed to start (${response.status})`)
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const chunks = buffer.split('\n\n')
+        buffer = chunks.pop() || ''
+
+        for (const chunk of chunks) {
+          const line = chunk.trim()
+          if (!line.startsWith('data:')) continue
+          const jsonStr = line.slice(5).trim()
+          if (!jsonStr) continue
+
+          const event = JSON.parse(jsonStr)
+          if (event.type === '__done__') {
+            setAgentStreamResult(event)
+          } else if (event.type === '__error__') {
+            setAgentStreamError(event.message)
+          } else {
+            setAgentStreamEvents((prev) => [...prev, event])
+          }
+        }
+      }
+    } catch (err) {
+      setAgentStreamError((err as Error).message)
+    } finally {
+      setAgentStreamRunning(false)
     }
   }
 
@@ -1166,6 +1247,7 @@ export default function UploadDataset({
     { id: 'upload', label: 'Upload CSV' },
     { id: 'profile', label: 'Data profile', disabled: !result },
     { id: 'analysis', label: 'AI analysis', disabled: !result },
+    { id: 'agent', label: 'Multi-Agent', disabled: !result },
     { id: 'chat', label: 'Ask your data', disabled: !result },
     { id: 'forecast', label: 'Forecast', disabled: !result },
     { id: 'clean', label: 'Clean Data', disabled: !result },
@@ -1926,6 +2008,91 @@ export default function UploadDataset({
         </div>
       )}
 
+      {/* ---------- Multi-Agent tab (live orchestration) ---------- */}
+      {result && activeTab === 'agent' && (
+        <div className="space-y-4 py-6">
+          <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+            <p className="text-sm font-semibold text-slate-100">Multi-Agent Analysis</p>
+            <p className="mb-3 text-xs text-slate-400">
+              Ask a question in plain English. The Manager Agent plans the work, delegates
+              to specialists, and shows its progress live as it happens.
+            </p>
+            <textarea
+              value={agentQuery}
+              onChange={(e) => setAgentQuery(e.target.value)}
+              rows={2}
+              placeholder="e.g. Why did revenue drop, and what should we do about it?"
+              className="w-full rounded-md border border-slate-700 bg-slate-950 p-2 text-sm text-slate-100 focus:border-cyan-600 focus:outline-none"
+            />
+            <button
+              onClick={handleRunAgentStream}
+              disabled={agentStreamRunning || !agentQuery.trim()}
+              className="mt-2 rounded-lg bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {agentStreamRunning ? 'Running…' : 'Run'}
+            </button>
+          </div>
+
+          {agentStreamError && <ErrorBanner message={agentStreamError} />}
+
+          {agentStreamEvents.length > 0 && (
+            <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+              <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400">
+                Live progress
+              </p>
+              <ol className="space-y-2">
+                {agentStreamEvents.map((event, i) => (
+                  <li key={i} className="flex items-start gap-2 text-sm">
+                    <span className="mt-0.5 w-4 shrink-0 text-center">
+                      {agentEventIcon(event.type)}
+                    </span>
+                    <div>
+                      <span className="font-medium text-slate-200">{event.agent}</span>
+                      <span className="ml-2 text-slate-400">{event.message}</span>
+                    </div>
+                  </li>
+                ))}
+                {agentStreamRunning && (
+                  <li className="flex items-center gap-2 text-sm text-slate-500">
+                    <span className="w-4 text-center">⟳</span>
+                    <span>working…</span>
+                  </li>
+                )}
+              </ol>
+            </div>
+          )}
+
+          {agentStreamResult && (
+            <div className="rounded-xl border border-cyan-800 bg-cyan-950/20 p-4">
+              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-cyan-400">
+                Final Answer
+              </p>
+              {agentStreamResult.result?.summary && (
+                <p className="text-sm text-slate-100">{agentStreamResult.result.summary}</p>
+              )}
+              {agentStreamResult.result?.recommendation && (
+                <p className="mt-2 text-sm text-slate-300">
+                  <span className="font-medium text-slate-200">Recommendation: </span>
+                  {agentStreamResult.result.recommendation}
+                </p>
+              )}
+              {agentStreamResult.result?.key_metrics && agentStreamResult.result.key_metrics.length > 0 && (
+                <ul className="mt-2 list-inside list-disc text-sm text-slate-300">
+                  {agentStreamResult.result.key_metrics.map((m, i) => (
+                    <li key={i}>{m}</li>
+                  ))}
+                </ul>
+              )}
+              <p className="mt-3 text-xs text-slate-500">
+                Status: {agentStreamResult.status}
+                {agentStreamResult.result?.participating_agents && agentStreamResult.result.participating_agents.length > 0 &&
+                  ` · Agents: ${agentStreamResult.result.participating_agents.join(', ')}`}
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ---------- Chat tab ---------- */}
       {result && activeTab === 'chat' && (
         <div className="space-y-4 py-6">
@@ -2580,6 +2747,36 @@ function ErrorBanner({ message }: { message: string }) {
   return (
     <div className="rounded-lg border border-red-800 bg-red-950/30 px-3 py-2 text-sm text-red-300">{message}</div>
   )
+}
+
+function agentEventIcon(type: string): string {
+  switch (type) {
+    case 'manager_start':
+    case 'plan_created':
+    case 'plan_ordered':
+      return '🧭'
+    case 'wave_started':
+      return '▶'
+    case 'task_started':
+      return '⟳'
+    case 'task_completed':
+      return '✓'
+    case 'task_failed':
+      return '✗'
+    case 'task_skipped':
+      return '⊘'
+    case 'task_retrying':
+      return '↻'
+    case 'quality_check_start':
+    case 'quality_check_completed':
+      return '🛡'
+    case 'quality_check_failed':
+      return '⚠'
+    case 'finished':
+      return '🏁'
+    default:
+      return '•'
+  }
 }
 
 function Stat({ label, value, isText }: { label: string; value: number | string; isText?: boolean }) {

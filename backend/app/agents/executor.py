@@ -25,16 +25,21 @@ from __future__ import annotations
 import asyncio
 from typing import Awaitable, Callable
 
+from app.agents.events import EventEmitter, NOOP_EMIT
 from app.agents.state import WorkflowState
 from app.agents.tracing import add_trace
 
 TaskRunner = Callable[[dict, WorkflowState], Awaitable[dict]]
 
 
-async def _run_with_retry(task: dict, state: WorkflowState, task_runner: TaskRunner) -> None:
+async def _run_with_retry(
+    task: dict, state: WorkflowState, task_runner: TaskRunner, emit: EventEmitter
+) -> None:
     task["status"] = "running"
     max_retries = task.get("max_retries", 1)
     timeout = task.get("timeout_seconds", 60)
+    await emit("task_started", task["agent"], f"{task['agent']} started: {task.get('task', '')}",
+                {"task_id": task["id"]})
 
     attempt = 0
     last_error: str | None = None
@@ -52,6 +57,8 @@ async def _run_with_retry(task: dict, state: WorkflowState, task_runner: TaskRun
             task["result"] = output
             task["retries"] = attempt
             add_trace(state, task["agent"], "completed", output_data=output)
+            await emit("task_completed", task["agent"], f"{task['agent']} completed",
+                        {"task_id": task["id"], "summary": output.get("summary", "")})
             state.specialist_results[task["agent"]] = output
             return
 
@@ -66,6 +73,8 @@ async def _run_with_retry(task: dict, state: WorkflowState, task_runner: TaskRun
                 state, task["agent"], "retrying",
                 error=f"attempt {attempt}/{max_retries}: {last_error}",
             )
+            await emit("task_retrying", task["agent"], f"{task['agent']} retrying ({attempt}/{max_retries})",
+                        {"task_id": task["id"], "error": last_error})
 
     # All attempts exhausted.
     task["status"] = "failed"
@@ -76,6 +85,7 @@ async def _run_with_retry(task: dict, state: WorkflowState, task_runner: TaskRun
     state.specialist_results[task["agent"]] = error_result
     state.add_error(task["agent"], last_error or "Task failed")
     add_trace(state, task["agent"], "failed", error=last_error)
+    await emit("task_failed", task["agent"], f"{task['agent']} failed", {"task_id": task["id"], "error": last_error})
 
 
 def _mark_skipped(task: dict, state: WorkflowState, reason: str) -> None:
@@ -88,6 +98,7 @@ async def execute_plan(
     state: WorkflowState,
     waves: list[list[dict]],
     task_runner: TaskRunner,
+    emit: EventEmitter = NOOP_EMIT,
 ) -> None:
     """Mutates state in place: state.tasks ends up with per-task
     status/result/error, state.specialist_results gets each successful
@@ -95,11 +106,14 @@ async def execute_plan(
     always produced, so _synthesize() in manager_v2.py needs no changes),
     and state.errors collects every failure without stopping the rest of
     the workflow.
+
+    `emit` is optional (Section 30's live progress) - defaults to a no-op,
+    so calling this without a frontend watching still behaves identically.
     """
     state.tasks = [t for wave in waves for t in wave]
     failed_or_skipped_ids: set[str] = set()
 
-    for wave in waves:
+    for wave_index, wave in enumerate(waves):
         runnable: list[dict] = []
         for task in wave:
             blocking = [dep for dep in task["depends_on"] if dep in failed_or_skipped_ids]
@@ -107,12 +121,16 @@ async def execute_plan(
                 _mark_skipped(
                     task, state, f"Skipped - dependency failed/skipped: {', '.join(blocking)}"
                 )
+                await emit("task_skipped", task["agent"], f"{task['agent']} skipped",
+                            {"task_id": task["id"], "reason": task["error"]})
                 failed_or_skipped_ids.add(task["id"])
             else:
                 runnable.append(task)
 
         if runnable:
-            await asyncio.gather(*(_run_with_retry(t, state, task_runner) for t in runnable))
+            await emit("wave_started", "Executor", f"Wave {wave_index + 1}: running {len(runnable)} task(s) in parallel",
+                        {"wave": wave_index + 1, "task_ids": [t["id"] for t in runnable]})
+            await asyncio.gather(*(_run_with_retry(t, state, task_runner, emit) for t in runnable))
             for t in runnable:
                 if t["status"] in ("failed", "skipped"):
                     failed_or_skipped_ids.add(t["id"])
