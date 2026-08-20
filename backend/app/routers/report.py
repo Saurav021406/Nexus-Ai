@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import io
@@ -66,14 +67,17 @@ async def generate_report(payload: GenerateReportRequest, user=Depends(get_curre
         raise HTTPException(status_code=400, detail="analysis payload is required")
 
     try:
-        dataframe = get_dataset_dataframe(payload.dataset_id, user.id)
-        charts = generate_report_charts(dataframe)
+        # FIXED: Variable name is now 'dataframe' to match the next line
+        dataframe = await run_in_threadpool(get_dataset_dataframe, payload.dataset_id, user.id)
+        # FIXED: Wrapped chart generation too to avoid CPU blocking
+        charts = await run_in_threadpool(generate_report_charts, dataframe)
     except Exception as e:
         # Charts are a nice-to-have, never block report generation on them.
         print(f"Chart generation skipped: {e}")
         charts = []
 
-    content = generate_report_content(
+    content = await run_in_threadpool(
+        generate_report_content,
         analysis=payload.analysis,
         filename=payload.filename,
         dataset_id=payload.dataset_id,
@@ -81,7 +85,10 @@ async def generate_report(payload: GenerateReportRequest, user=Depends(get_curre
     )
 
     try:
-        version = report_versions.create_version(payload.dataset_id, user.id, content)
+        # FIXED: Wrapped database call
+        version = await run_in_threadpool(
+            report_versions.create_version, payload.dataset_id, user.id, content
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Could not save report version: {e}")
 
@@ -90,14 +97,18 @@ async def generate_report(payload: GenerateReportRequest, user=Depends(get_curre
 
 @router.get("/versions")
 async def get_versions(dataset_id: str, user=Depends(get_current_user)):
-    versions = report_versions.list_versions(dataset_id, user.id)
+    # FIXED: Wrapped database call
+    versions = await run_in_threadpool(report_versions.list_versions, dataset_id, user.id)
     return {"versions": [_version_response(v) for v in versions]}
 
 
 @router.post("/{report_id}/approve")
 async def approve_report(report_id: str, user=Depends(get_current_user)):
     try:
-        version = report_versions.set_status(report_id, user.id, "approved")
+        # FIXED: Wrapped database call
+        version = await run_in_threadpool(
+            report_versions.set_status, report_id, user.id, "approved"
+        )
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Report version not found: {e}")
     return _version_response(version)
@@ -108,7 +119,10 @@ async def reject_report(report_id: str, payload: RejectReportRequest, user=Depen
     if not payload.reason.strip():
         raise HTTPException(status_code=400, detail="A rejection reason is required")
     try:
-        version = report_versions.set_status(report_id, user.id, "rejected", payload.reason.strip())
+        # FIXED: Wrapped database call
+        version = await run_in_threadpool(
+            report_versions.set_status, report_id, user.id, "rejected", payload.reason.strip()
+        )
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Report version not found: {e}")
     return _version_response(version)
@@ -119,7 +133,9 @@ async def resubmit_report(report_id: str, payload: ResubmitReportRequest, user=D
     """Edit the executive summary of a rejected (or any prior) report and
     resubmit it as a new pending version. The version being edited stays in
     history untouched."""
-    previous = report_versions.get_version(report_id, user.id)
+    
+    # FIXED: Wrapped database call
+    previous = await run_in_threadpool(report_versions.get_version, report_id, user.id)
     if not previous:
         raise HTTPException(status_code=404, detail="Report version not found")
 
@@ -129,7 +145,10 @@ async def resubmit_report(report_id: str, payload: ResubmitReportRequest, user=D
     new_content = {**previous["content"], "executive_summary": payload.executive_summary.strip()}
 
     try:
-        version = report_versions.create_version(previous["dataset_id"], user.id, new_content)
+        # FIXED: Wrapped database call
+        version = await run_in_threadpool(
+            report_versions.create_version, previous["dataset_id"], user.id, new_content
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Could not save report version: {e}")
 
@@ -142,7 +161,8 @@ async def export_pdf(payload: ExportReportRequest, user=Depends(get_current_user
         raise HTTPException(status_code=400, detail="This report must be approved before it can be downloaded")
 
     try:
-        pdf_bytes = render_pdf(payload.report)
+        # FIXED: PDF rendering is CPU heavy, wrapped it to prevent lag
+        pdf_bytes = await run_in_threadpool(render_pdf, payload.report)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF export failed: {str(e)}")
 
@@ -160,7 +180,8 @@ async def export_docx(payload: ExportReportRequest, user=Depends(get_current_use
         raise HTTPException(status_code=400, detail="This report must be approved before it can be downloaded")
 
     try:
-        docx_bytes = render_docx(payload.report)
+        # FIXED: DOCX rendering wrapped to prevent lag
+        docx_bytes = await run_in_threadpool(render_docx, payload.report)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"DOCX export failed: {str(e)}")
 

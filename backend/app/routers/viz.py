@@ -58,7 +58,7 @@ async def generate(payload: GenerateRequest, user=Depends(get_current_user)):
     """Always returns {"charts": [...]} - a single manually-built chart is a
     1-item list; a natural-language request can return up to 3 charts if the
     request genuinely calls for multiple angles on the data."""
-    df = get_dataset_dataframe(payload.dataset_id, user.id)
+    df = await run_in_threadpool(get_dataset_dataframe, payload.dataset_id, user.id)
 
     # ---------- Natural language path: can produce multiple charts ----------
     if payload.nl_request and not payload.chart_type:
@@ -113,7 +113,7 @@ async def generate(payload: GenerateRequest, user=Depends(get_current_user)):
 
 @router.post("/dashboard")
 async def dashboard(payload: DashboardRequest, user=Depends(get_current_user)):
-    df = get_dataset_dataframe(payload.dataset_id, user.id)
+    df = await run_in_threadpool(get_dataset_dataframe, payload.dataset_id, user.id)
     charts = await run_in_threadpool(generate_dashboard, df)
     if not charts:
         raise HTTPException(status_code=400, detail="Could not generate any charts for this dataset")

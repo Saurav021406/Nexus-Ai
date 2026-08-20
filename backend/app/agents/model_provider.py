@@ -3,20 +3,21 @@ interface.
 
 Stack (Section 5 of the Phase 4 spec: "Use OpenAI Agents SDK as the primary
 agent runtime"):
-  1. Groq   - primary   (fast, cheap, strong general-purpose model)
-  2. NVIDIA - secondary (this project's original primary - kept as the
-                          first fallback rather than dropped, since it's
-                          proven reliable in the rest of the codebase)
-  3. Claude - tertiary  (replaces the old OpenRouter-routed Gemini fallback;
-                          still routed through OpenRouter, just pointed at
-                          a Claude model now instead of Gemini)
+  1. Groq     - primary   (fast, cheap, strong general-purpose model)
+  2. NVIDIA   - secondary (this project's original primary - kept as the
+                            first fallback rather than dropped, since it's
+                            proven reliable in the rest of the codebase)
+  3. MiniMax  - tertiary  (minimaxai/minimax-m3, served via the same
+                            NVIDIA build.nvidia.com catalog/API key as the
+                            NVIDIA tier above - replaces the old
+                            OpenRouter-routed Claude fallback)
 
 All three expose OpenAI-compatible chat completions endpoints, so all three
 go through the SDK's own `OpenAIChatCompletionsModel` - no custom low-level
 Model implementation needed for any of them, which keeps this low-risk.
 
 Design note: this file deliberately stays a FALLBACK chain, not the
-parallel Groq+NVIDIA+Claude "Consensus Engine" used elsewhere in this app
+parallel Groq+NVIDIA+MiniMax "Consensus Engine" used elsewhere in this app
 (see app/services/consensus.py). The Agents SDK's `Model` interface has to
 return one coherent set of tool-calls/handoffs/structured output per turn -
 three models could each choose to call different tools, so there's no sane
@@ -58,15 +59,16 @@ from app.config import settings
 # separate, already-working mechanism that writes to WorkflowState.traces.
 set_tracing_disabled(True)
 
-GROQ_MODEL_NAME = "llama-3.3-70b-versatile"
+GROQ_MODEL_NAME ="openai/gpt-oss-120b"
 NVIDIA_MODEL_NAME = "nvidia/nemotron-3-super-120b-a12b"
-CLAUDE_MODEL_NAME = "anthropic/claude-sonnet-4.5"
+MINIMAX_MODEL_NAME = "minimaxai/minimax-m3"
 
 
 def _build_groq_model() -> OpenAIChatCompletionsModel:
     client = AsyncOpenAI(
         base_url="https://api.groq.com/openai/v1",
         api_key=settings.groq_api_key,
+        timeout=20,
     )
     return OpenAIChatCompletionsModel(model=GROQ_MODEL_NAME, openai_client=client)
 
@@ -75,20 +77,22 @@ def _build_nvidia_model() -> OpenAIChatCompletionsModel:
     client = AsyncOpenAI(
         base_url="https://integrate.api.nvidia.com/v1",
         api_key=settings.nvidia_api_key,
+        timeout=20,
     )
     return OpenAIChatCompletionsModel(model=NVIDIA_MODEL_NAME, openai_client=client)
 
 
-def _build_claude_model() -> OpenAIChatCompletionsModel:
+def _build_minimax_model() -> OpenAIChatCompletionsModel:
     client = AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=settings.openrouter_api_key,
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_key=settings.nvidia_api_key,
+        timeout=20,
     )
-    return OpenAIChatCompletionsModel(model=CLAUDE_MODEL_NAME, openai_client=client)
+    return OpenAIChatCompletionsModel(model=MINIMAX_MODEL_NAME, openai_client=client)
 
 
 class FallbackModel(Model):
-    """Tries Groq, then NVIDIA, then Claude, in that order. Each tier
+    """Tries Groq, then NVIDIA, then MiniMax-M3, in that order. Each tier
     only gets called if every prior tier raised - a slow primary doesn't
     delay things further by also being retried, it just fails fast onto
     the next tier.
@@ -103,7 +107,7 @@ class FallbackModel(Model):
         self._tiers = [
             ("Groq", _build_groq_model),
             ("NVIDIA", _build_nvidia_model),
-            ("Claude", _build_claude_model),
+            ("MiniMax", _build_minimax_model),
         ]
 
     async def get_response(
@@ -141,7 +145,7 @@ class FallbackModel(Model):
                 errors.append(f"{tier_name}: {e}")
 
         raise RuntimeError(
-            "All model providers failed (Groq -> NVIDIA -> Claude). " + " | ".join(errors)
+            "All model providers failed (Groq -> NVIDIA -> MiniMax-M3). " + " | ".join(errors)
         )
 
     def stream_response(

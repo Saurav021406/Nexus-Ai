@@ -3,6 +3,7 @@ distributions, used to power simple charts on the frontend."""
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from app.deps import get_current_user
@@ -26,7 +27,7 @@ class DistributionRequest(BaseModel):
 
 @router.post("/correlation")
 async def get_correlation(payload: DatasetIdRequest, user=Depends(get_current_user)):
-    df = get_dataset_dataframe(payload.dataset_id, user.id)
+    df = await run_in_threadpool(get_dataset_dataframe, payload.dataset_id, user.id)
     numeric_df = df.select_dtypes(include="number")
 
     if numeric_df.shape[1] < 2:
@@ -49,7 +50,7 @@ async def get_correlation(payload: DatasetIdRequest, user=Depends(get_current_us
 
 @router.post("/columns")
 async def get_chartable_columns(payload: DatasetIdRequest, user=Depends(get_current_user)):
-    df = get_dataset_dataframe(payload.dataset_id, user.id)
+    df = await run_in_threadpool(get_dataset_dataframe, payload.dataset_id, user.id)
     numeric_cols = df.select_dtypes(include="number").columns.tolist()
     categorical_cols = [
         col for col in df.select_dtypes(include="object").columns
@@ -60,7 +61,7 @@ async def get_chartable_columns(payload: DatasetIdRequest, user=Depends(get_curr
 
 @router.post("/distribution")
 async def get_distribution(payload: DistributionRequest, user=Depends(get_current_user)):
-    df = get_dataset_dataframe(payload.dataset_id, user.id)
+    df = await run_in_threadpool(get_dataset_dataframe, payload.dataset_id, user.id)
 
     if payload.column not in df.columns:
         raise HTTPException(status_code=400, detail=f"Column '{payload.column}' not found")

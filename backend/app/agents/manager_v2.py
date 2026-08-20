@@ -27,7 +27,8 @@ from app.agents.executor import execute_plan
 from app.agents.events import EventEmitter, NOOP_EMIT
 from app.agents.model_provider import get_nexus_model
 from app.agents.planner import validate_and_order_plan
-from app.agents.quality import quality_check
+from app.agents.reviewer import review_check
+from app.agents.security import security_check
 from app.agents.registry import get_agent, available_agent_domains, list_capabilities
 from app.agents.state import WorkflowState
 from app.agents.tracing import add_trace
@@ -163,37 +164,58 @@ async def run_manager_v2(state: WorkflowState, emit: EventEmitter = NOOP_EMIT) -
         agent_fn = get_agent(task["agent"])
         if not agent_fn:
             return {"error": f"{task['agent']} specialist is not installed"}
-        output = await asyncio.to_thread(agent_fn, state.data_summary)
+        # BUGFIX: specialists used to only ever see state.data_summary, never
+        # the user's actual question or the Manager's planned task for them -
+        # so every run produced the same generic dataset overview regardless
+        # of what was asked. Passing task["task"] (falls back to the raw user
+        # query if a specialist doesn't support it) closes that gap.
+        task_description = task.get("task") or state.user_query or ""
+        output = await asyncio.to_thread(agent_fn, state.data_summary, task_description)
         if not isinstance(output, dict):
             return {"error": "Specialist returned invalid format"}
         return output
 
     await execute_plan(state, plan_result.waves, run_specialist_task, emit)
 
-    # ---------- 4. Reviewer + Security (reuses the existing quality_check -
-    # separating these into two independent agents is a later step) ----------
-    await emit("quality_check_start", "Quality", "Running reviewer and security checks...", None)
-    try:
-        quality = await asyncio.to_thread(quality_check, state)
-        state.review = quality.get("review")
-        state.security = quality.get("security")
-        add_trace(state, "Quality", "completed", output_data=quality)
-        await emit("quality_check_completed", "Quality", "Quality checks complete", quality)
-    except Exception as e:
+    # ---------- 4. Reviewer + Security (independent agents, run in
+    # PARALLEL - neither depends on the other's output, so there's no
+    # reason to pay for two sequential consensus round-trips here) ----------
+    await emit("reviewer_check_start", "Reviewer", "Reviewing specialist reports for accuracy and consistency...", None)
+    await emit("security_check_start", "Security", "Running security and PII checks...", None)
+
+    review_task = asyncio.to_thread(review_check, state)
+    security_task = asyncio.to_thread(security_check, state)
+    review_result, security_result = await asyncio.gather(
+        review_task, security_task, return_exceptions=True
+    )
+
+    if isinstance(review_result, Exception):
         state.review = {
             "overall_quality": "medium",
-            "issues": [f"Reviewer failed: {str(e)}"],
+            "issues": [f"Reviewer failed: {str(review_result)}"],
             "approved": True,
             "suggested_improvements": [],
         }
+        add_trace(state, "Reviewer", "failed", error=str(review_result))
+        await emit("reviewer_check_failed", "Reviewer", "Review failed, using safe defaults", {"error": str(review_result)})
+    else:
+        state.review = review_result
+        add_trace(state, "Reviewer", "completed", output_data=state.review)
+        await emit("reviewer_check_completed", "Reviewer", "Review complete", state.review)
+
+    if isinstance(security_result, Exception):
         state.security = {
             "risk_level": "medium",
-            "findings": [f"Security agent failed: {str(e)}"],
+            "findings": [f"Security agent failed: {str(security_result)}"],
             "blocked": False,
             "safe_to_show": True,
         }
-        add_trace(state, "Quality", "failed", error=str(e))
-        await emit("quality_check_failed", "Quality", "Quality checks failed, using safe defaults", {"error": str(e)})
+        add_trace(state, "Security", "failed", error=str(security_result))
+        await emit("security_check_failed", "Security", "Security checks failed, using safe defaults", {"error": str(security_result)})
+    else:
+        state.security = security_result
+        add_trace(state, "Security", "completed", output_data=state.security)
+        await emit("security_check_completed", "Security", "Security checks complete", state.security)
 
     # ---------- 5. Final synthesis ----------
     state.final_output = _synthesize(state)

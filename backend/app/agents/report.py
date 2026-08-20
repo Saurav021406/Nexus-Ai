@@ -10,7 +10,7 @@ security, plan, traces) and produces structured, human-readable report content:
   - per-specialist sections
 
 Both narratives come from a single call to the Consensus Engine (Groq +
-NVIDIA Nemotron + Claude queried in parallel, merged with agreement/
+NVIDIA Nemotron + MiniMax-M3 queried in parallel, merged with agreement/
 contradiction detection - see app/services/consensus.py). Both are
 strictly grounded in the analysis JSON - the prompt forbids inventing new
 numbers or claims.

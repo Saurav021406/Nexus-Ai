@@ -1,12 +1,20 @@
 from app.services.consensus import get_consensus_json
 
 
-def analyze(data_summary: str) -> dict:
+def analyze(data_summary: str, task_description: str = "") -> dict:
     """Safe fallback when no specialist is a confident fit for a dataset."""
+    focus_block = (
+        f"The user's specific request for this analysis is: {task_description}\n"
+        "Directly address this request in your summary, key_metrics, and recommendation, "
+        "while still only using the exact numbers given below."
+        if task_description else ""
+    )
     prompt = f"""You are a general data analyst. The following is a privacy-safe,
 precise statistical summary computed from the full dataset. Use ONLY the supplied
 figures for any number you state. Do not infer a business domain that is not
 supported by the summary.
+
+{focus_block}
 
 {data_summary}
 

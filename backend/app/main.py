@@ -12,6 +12,7 @@ from app.routers import eda
 from app.routers import viz
 from app.routers import report
 from app.routers import agent
+from app.routers import approvals
 
 app = FastAPI(title="Nexus AI Backend", version="0.1.0")
 
@@ -33,6 +34,7 @@ app.include_router(eda.router)
 app.include_router(viz.router)
 app.include_router(report.router)
 app.include_router(agent.router)
+app.include_router(approvals.router)
 
 
 @app.get("/")

@@ -6,6 +6,7 @@ and consistent with the Analysis tab.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from app.deps import get_current_user
@@ -30,7 +31,7 @@ class ChatRequest(BaseModel):
 
 @router.post("")
 async def chat_with_dataset(payload: ChatRequest, user=Depends(get_current_user)):
-    dataframe = get_dataset_dataframe(payload.dataset_id, user.id)
+    dataframe = await run_in_threadpool(get_dataset_dataframe, payload.dataset_id, user.id)
     data_summary = build_data_summary(dataframe)
 
     recent_history = payload.history[-MAX_HISTORY_MESSAGES:]
@@ -55,7 +56,7 @@ USER QUESTION: {payload.question}
 Answer in 2-4 short sentences, plain text, no markdown formatting, no JSON."""
 
     try:
-        result = get_consensus(prompt, temperature=1, max_tokens=1024)
+        result = await run_in_threadpool(get_consensus, prompt, temperature=1, max_tokens=1024)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
 

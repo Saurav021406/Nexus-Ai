@@ -3,6 +3,7 @@
 import io
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool  # <-- Added this missing import
 from pydantic import BaseModel
 
 from app.deps import get_current_user
@@ -28,13 +29,15 @@ class CleanRequest(BaseModel):
 @router.post("/quality")
 async def check_quality(payload: DatasetIdRequest, user=Depends(get_current_user)):
     """Read-only - reports issues without modifying anything."""
-    df = get_dataset_dataframe(payload.dataset_id, user.id)
+    # Fixed: wrapped get_dataset_dataframe
+    df = await run_in_threadpool(get_dataset_dataframe, payload.dataset_id, user.id)
     return analyze_data_quality(df)
 
 
 @router.post("/apply")
 async def apply_cleaning(payload: CleanRequest, user=Depends(get_current_user)):
-    df = get_dataset_dataframe(payload.dataset_id, user.id)
+    # Fixed: wrapped get_dataset_dataframe
+    df = await run_in_threadpool(get_dataset_dataframe, payload.dataset_id, user.id)
 
     options = {
         "fill_missing": payload.fill_missing,
@@ -46,7 +49,10 @@ async def apply_cleaning(payload: CleanRequest, user=Depends(get_current_user)):
 
     # Save the cleaned version as a separate file - the original upload is
     # never overwritten, so the user can always go back to the raw data.
-    dataset = get_dataset_record(payload.dataset_id, user.id)
+    
+    # Fixed: wrapped get_dataset_record because it is also a blocking network call
+    dataset = await run_in_threadpool(get_dataset_record, payload.dataset_id, user.id)
+    
     cleaned_path = f"{user.id}/{payload.dataset_id}_cleaned.csv"
 
     csv_bytes = cleaned_df.to_csv(index=False).encode("utf-8")

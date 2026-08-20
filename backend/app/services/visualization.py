@@ -286,7 +286,7 @@ def explain_chart(
 
 
 def suggest_multiple_charts_from_request(columns_info: list[dict], nl_request: str) -> list[dict]:
-    """Uses the Consensus Engine (Groq + NVIDIA Nemotron + Claude) to
+    """Uses the Consensus Engine (Groq + NVIDIA Nemotron + MiniMax-M3) to
     translate a natural-language request into one or more chart specs - a
     single query like 'show me sales trends' can reasonably map to 2-3
     complementary charts. Python still does all the actual

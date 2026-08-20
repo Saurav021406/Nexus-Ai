@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from app.agents import education, finance, generic, healthcare, hr, retail
+from app.agents.tools import list_tools
 
 
 @dataclass
@@ -50,42 +51,42 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
         description="Domain specialist for education/academic datasets (grades, attendance, courses).",
         fn=education.analyze,
         capabilities=["academic_performance_analysis", "engagement_trends"],
-        tools=["load_dataset", "get_statistics"],
+        tools=["get_statistics", "load_dataset_sample"],  # real Tool Registry names, see agents/tools.py
     ),
     "Retail": AgentDefinition(
         name="Retail",
         description="Domain specialist for retail/e-commerce datasets (sales, inventory, orders).",
         fn=retail.analyze,
         capabilities=["sales_trend_analysis", "inventory_insight", "customer_behavior"],
-        tools=["load_dataset", "get_statistics"],
+        tools=["get_statistics", "load_dataset_sample"],  # real Tool Registry names, see agents/tools.py
     ),
     "Finance": AgentDefinition(
         name="Finance",
         description="Domain specialist for financial datasets (revenue, expenses, transactions).",
         fn=finance.analyze,
         capabilities=["financial_trend_analysis", "risk_indicators"],
-        tools=["load_dataset", "get_statistics"],
+        tools=["get_statistics", "load_dataset_sample"],  # real Tool Registry names, see agents/tools.py
     ),
     "HR": AgentDefinition(
         name="HR",
         description="Domain specialist for HR/people datasets (headcount, attrition, performance).",
         fn=hr.analyze,
         capabilities=["attrition_analysis", "workforce_insight"],
-        tools=["load_dataset", "get_statistics"],
+        tools=["get_statistics", "load_dataset_sample"],  # real Tool Registry names, see agents/tools.py
     ),
     "Healthcare": AgentDefinition(
         name="Healthcare",
         description="Domain specialist for healthcare/clinical datasets.",
         fn=healthcare.analyze,
         capabilities=["clinical_trend_analysis", "patient_outcome_insight"],
-        tools=["load_dataset", "get_statistics"],
+        tools=["get_statistics", "load_dataset_sample"],  # real Tool Registry names, see agents/tools.py
     ),
     "General": AgentDefinition(
         name="General",
         description="Fallback specialist for datasets that don't fit a specific domain.",
         fn=generic.analyze,
         capabilities=["general_statistical_analysis"],
-        tools=["load_dataset", "get_statistics"],
+        tools=["get_statistics", "load_dataset_sample"],  # real Tool Registry names, see agents/tools.py
     ),
 }
 
@@ -107,4 +108,16 @@ def list_capabilities() -> list[dict]:
     """Full registry snapshot, in the shape the Manager Agent's prompt
     context and the future /agent/registry endpoint both want."""
     return [d.to_dict() for d in AGENT_DEFINITIONS.values()]
+
+
+# Fail fast on a typo'd tool name rather than silently telling the Manager
+# an agent has a tool that doesn't exist in the real Tool Registry.
+_known_tool_names = {t["name"] for t in list_tools()}
+for _definition in AGENT_DEFINITIONS.values():
+    _unknown = set(_definition.tools) - _known_tool_names
+    if _unknown:
+        raise RuntimeError(
+            f"Agent '{_definition.name}' references unknown tool(s) {_unknown} "
+            f"- not present in app.agents.tools.TOOL_REGISTRY."
+        )
 

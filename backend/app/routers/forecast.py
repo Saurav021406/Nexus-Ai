@@ -9,6 +9,7 @@ predictions, unlike the Consensus-Engine-based analysis/chat features.
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score, mean_absolute_error
@@ -48,7 +49,7 @@ def _find_date_column(df: pd.DataFrame) -> str | None:
 @router.post("/columns")
 async def get_forecastable_columns(payload: ColumnsRequest, user=Depends(get_current_user)):
     """Returns which numeric columns are suitable targets for forecasting."""
-    df = get_dataset_dataframe(payload.dataset_id, user.id)
+    df = await run_in_threadpool(get_dataset_dataframe, payload.dataset_id, user.id)
     numeric_cols = df.select_dtypes(include="number").columns.tolist()
 
     if not numeric_cols:
@@ -63,7 +64,7 @@ async def get_forecastable_columns(payload: ColumnsRequest, user=Depends(get_cur
 
 @router.post("")
 async def run_forecast(payload: ForecastRequest, user=Depends(get_current_user)):
-    df = get_dataset_dataframe(payload.dataset_id, user.id)
+    df = await run_in_threadpool(get_dataset_dataframe, payload.dataset_id, user.id)
 
     if payload.target_column not in df.columns:
         raise HTTPException(status_code=400, detail=f"Column '{payload.target_column}' not found")

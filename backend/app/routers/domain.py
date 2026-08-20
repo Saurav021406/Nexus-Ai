@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from app.agents.manager import run_manager
@@ -38,13 +39,13 @@ def _route_for_dataset(dataset_id: str, user_id: str) -> tuple[DomainRoute, Any]
 
 @router.post("/detect")
 async def detect_domain(payload: DomainDetectRequest, user=Depends(get_current_user)):
-    route, _ = _route_for_dataset(payload.dataset_id, user.id)
+    route, _ = await run_in_threadpool(_route_for_dataset, payload.dataset_id, user.id)
     return route.to_dict()
 
 
 @router.post("/analyze")
 async def analyze_domain(payload: AnalyzeRequest, user=Depends(get_current_user)):
-    route, dataframe = _route_for_dataset(payload.dataset_id, user.id)
+    route, dataframe = await run_in_threadpool(_route_for_dataset, payload.dataset_id, user.id)
 
     # Allow optional human override of domains
     if payload.selected_domains:
@@ -66,7 +67,7 @@ async def analyze_domain(payload: AnalyzeRequest, user=Depends(get_current_user)
             candidates=route.candidates,
         )
 
-    data_summary = build_data_summary(dataframe)
+    data_summary = await run_in_threadpool(build_data_summary, dataframe)
 
     state = WorkflowState(
         dataset_id=payload.dataset_id,

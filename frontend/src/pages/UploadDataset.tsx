@@ -2767,6 +2767,16 @@ function agentEventIcon(type: string): string {
       return '⊘'
     case 'task_retrying':
       return '↻'
+    case 'reviewer_check_start':
+    case 'reviewer_check_completed':
+      return '📝'
+    case 'reviewer_check_failed':
+      return '⚠'
+    case 'security_check_start':
+    case 'security_check_completed':
+      return '🔒'
+    case 'security_check_failed':
+      return '⚠'
     case 'quality_check_start':
     case 'quality_check_completed':
       return '🛡'

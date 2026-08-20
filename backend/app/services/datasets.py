@@ -107,11 +107,12 @@ def build_data_summary(df: pd.DataFrame) -> str:
     ]
 
     numeric_cols = df.select_dtypes(include="number").columns
-    if len(numeric_cols) > 0:
+    numeric_cols_filtered = [
+        col for col in numeric_cols if not _is_sensitive_column(col) and not _is_identifier_column(col)
+    ]
+    if len(numeric_cols_filtered) > 0:
         lines.append("Numeric column statistics (computed precisely from the FULL dataset):")
-        for col in numeric_cols:
-            if _is_sensitive_column(col) or _is_identifier_column(col):
-                continue
+        for col in numeric_cols_filtered:
             s = df[col].dropna()
             if len(s) == 0:
                 continue
@@ -119,6 +120,25 @@ def build_data_summary(df: pd.DataFrame) -> str:
                 f"- {col}: sum={s.sum():.2f}, mean={s.mean():.2f}, "
                 f"min={s.min():.2f}, max={s.max():.2f}, count={len(s)}"
             )
+        lines.append("")
+
+    # Pairwise correlations - without this, "which factor most affects X"
+    # style questions can't actually be answered (means alone don't say
+    # anything about how columns move together). Pandas computes this
+    # exactly from the full data, same as every other number in this
+    # summary - nothing here is estimated or guessed by a model.
+    if len(numeric_cols_filtered) >= 2:
+        corr_matrix = df[numeric_cols_filtered].corr(numeric_only=True)
+        lines.append("Pairwise correlations between numeric columns (Pearson r, -1 to 1; closer to +/-1 = stronger relationship):")
+        seen_pairs = set()
+        for col_a in numeric_cols_filtered:
+            for col_b in numeric_cols_filtered:
+                if col_a == col_b or (col_b, col_a) in seen_pairs:
+                    continue
+                seen_pairs.add((col_a, col_b))
+                value = corr_matrix.loc[col_a, col_b]
+                if pd.notna(value):
+                    lines.append(f"- {col_a} vs {col_b}: r={value:.3f}")
         lines.append("")
 
     categorical_cols = df.select_dtypes(exclude="number").columns
