@@ -14,7 +14,7 @@ instead of a plain dict literal.
 from dataclasses import dataclass, field
 from typing import Callable
 
-from app.agents import education, finance, generic, healthcare, hr, retail
+from app.agents import business_analyst, data_engineer, data_scientist, education, finance, generic, healthcare, hr, ml_engineer, retail, sql_agent, visualization_agent
 from app.agents.tools import list_tools
 
 
@@ -30,6 +30,11 @@ class AgentDefinition:
     permissions: str = "READ_ONLY"
     status: str = "active"
     version: str = "1.0"
+    # Most agents only ever see the privacy-filtered data_summary text - that's
+    # enough for reasoning-over-a-summary agents. The SQL Agent genuinely needs
+    # dataset_id/user_id to run real queries, so it opts into getting the full
+    # WorkflowState instead - see manager_v2.run_specialist_task for the branch.
+    needs_full_access: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -87,6 +92,62 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
         fn=generic.analyze,
         capabilities=["general_statistical_analysis"],
         tools=["get_statistics", "load_dataset_sample"],  # real Tool Registry names, see agents/tools.py
+    ),
+    # --- Functional agents (Section 16) - domain-agnostic, chosen by WHAT
+    # kind of analysis is needed rather than WHAT industry the data is from.
+    # The Manager can combine these with a domain specialist in one plan,
+    # e.g. Finance + Business Analyst for a finance question that also
+    # needs an executive-summary framing. ---
+    "Data Engineer": AgentDefinition(
+        name="Data Engineer",
+        description="Assesses data quality: missing values, outliers, type issues, cleanliness.",
+        fn=data_engineer.analyze,
+        capabilities=["data_quality_assessment", "cleaning_recommendations"],
+        tools=["get_statistics", "load_dataset_sample"],
+    ),
+    "Data Scientist": AgentDefinition(
+        name="Data Scientist",
+        description="Statistical analysis: correlations, distributions, trends, testable hypotheses.",
+        fn=data_scientist.analyze,
+        capabilities=["statistics", "eda", "correlation_analysis", "distribution_analysis"],
+        tools=["get_statistics", "load_dataset_sample"],
+    ),
+    "ML Engineer": AgentDefinition(
+        name="ML Engineer",
+        description=(
+            "Assesses modeling/forecasting readiness and recommends an approach. "
+            "Does not train models - orchestration-layer reasoning only (Phase 4 scope)."
+        ),
+        fn=ml_engineer.analyze,
+        capabilities=["modeling_readiness_assessment", "target_variable_identification"],
+        tools=["get_statistics", "load_dataset_sample"],
+    ),
+    "Business Analyst": AgentDefinition(
+        name="Business Analyst",
+        description="Translates technical findings into business meaning, KPIs, and recommendations.",
+        fn=business_analyst.analyze,
+        capabilities=["business_interpretation", "kpi_analysis", "executive_summary"],
+        tools=["get_statistics", "load_dataset_sample"],
+    ),
+    "Visualization": AgentDefinition(
+        name="Visualization",
+        description="Recommends which chart type(s) best represent the data. Does not render charts.",
+        fn=visualization_agent.analyze,
+        capabilities=["chart_type_recommendation"],
+        tools=["get_statistics", "load_dataset_sample"],
+    ),
+    "SQL": AgentDefinition(
+        name="SQL",
+        description=(
+            "Answers precise, row-level questions by writing and safely running a real "
+            "read-only SQL query against the dataset (treated as a single table `data`)."
+        ),
+        fn=sql_agent.analyze,
+        capabilities=["sql_generation", "sql_validation", "read_only_query_execution"],
+        tools=["inspect_schema", "validate_sql", "execute_read_only_query"],
+        input_schema="full WorkflowState (needs dataset_id/user_id, not just data_summary)",
+        output_schema="{summary, key_metrics, recommendation, sql_query, columns, row_count}",
+        needs_full_access=True,
     ),
 }
 

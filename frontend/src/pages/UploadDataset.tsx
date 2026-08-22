@@ -139,6 +139,42 @@ interface AgentStreamDone {
     participating_agents?: string[]
     goal?: string
   }
+  approval?: AgentApproval | null
+}
+
+interface AgentApproval {
+  id: string
+  resource_type: string
+  resource_id: string
+  dataset_id?: string | null
+  version_number: number
+  approval_status: 'pending' | 'approved' | 'rejected'
+  rejection_reason?: string | null
+  created_at?: string
+}
+
+interface AgentRunSummary {
+  workflow_id: string
+  dataset_id: string | null
+  user_query: string
+  goal: string
+  status: string
+  created_at: string
+  updated_at: string
+}
+
+interface AgentRunDetail {
+  workflow_id: string
+  user_id: string
+  dataset_id: string | null
+  user_query: string
+  goal: string
+  status: string
+  state: {
+    final_output?: AgentStreamDone['result']
+  }
+  created_at: string
+  updated_at: string
 }
 
 interface AgentResult {
@@ -457,6 +493,22 @@ export default function UploadDataset({
   const [agentStreamEvents, setAgentStreamEvents] = useState<AgentStreamEvent[]>([])
   const [agentStreamResult, setAgentStreamResult] = useState<AgentStreamDone | null>(null)
   const [agentStreamError, setAgentStreamError] = useState<string | null>(null)
+  const [agentApproval, setAgentApproval] = useState<AgentApproval | null>(null)
+  const [agentApprovalActionLoading, setAgentApprovalActionLoading] = useState<'approve' | 'reject' | null>(null)
+  const [agentApprovalError, setAgentApprovalError] = useState<string | null>(null)
+  const [agentShowRejectForm, setAgentShowRejectForm] = useState(false)
+  const [agentRejectReason, setAgentRejectReason] = useState('')
+
+  const [agentHistoryOpen, setAgentHistoryOpen] = useState(false)
+  const [agentHistoryLoading, setAgentHistoryLoading] = useState(false)
+  const [agentHistoryError, setAgentHistoryError] = useState<string | null>(null)
+  const [agentHistoryRuns, setAgentHistoryRuns] = useState<AgentRunSummary[]>([])
+  const [selectedHistoryRun, setSelectedHistoryRun] = useState<AgentRunDetail | null>(null)
+  const [selectedHistoryApproval, setSelectedHistoryApproval] = useState<AgentApproval | null>(null)
+  const [historyLoadingId, setHistoryLoadingId] = useState<string | null>(null)
+  const [historyApprovalActionLoading, setHistoryApprovalActionLoading] = useState<'approve' | 'reject' | null>(null)
+  const [historyShowRejectForm, setHistoryShowRejectForm] = useState(false)
+  const [historyRejectReason, setHistoryRejectReason] = useState('')
   const [reportVersions, setReportVersions] = useState<ReportVersion[]>([])
   const [showVersionHistory, setShowVersionHistory] = useState(false)
   const [versionsLoading, setVersionsLoading] = useState(false)
@@ -674,6 +726,10 @@ export default function UploadDataset({
     setAgentStreamEvents([])
     setAgentStreamResult(null)
     setAgentStreamError(null)
+    setAgentApproval(null)
+    setAgentApprovalError(null)
+    setAgentShowRejectForm(false)
+    setAgentRejectReason('')
 
     try {
       const headers = await authHeader()
@@ -708,6 +764,7 @@ export default function UploadDataset({
           const event = JSON.parse(jsonStr)
           if (event.type === '__done__') {
             setAgentStreamResult(event)
+            setAgentApproval(event.approval ?? null)
           } else if (event.type === '__error__') {
             setAgentStreamError(event.message)
           } else {
@@ -719,6 +776,152 @@ export default function UploadDataset({
       setAgentStreamError((err as Error).message)
     } finally {
       setAgentStreamRunning(false)
+    }
+  }
+
+  async function handleApproveAgentWorkflow() {
+    if (!agentApproval) return
+    setAgentApprovalActionLoading('approve')
+    setAgentApprovalError(null)
+    try {
+      const headers = await authHeader()
+      const response = await fetch(`${API_BASE_URL}/approvals/${agentApproval.id}/approve`, {
+        method: 'POST',
+        headers,
+      })
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Approve failed (${response.status})`)
+      }
+      setAgentApproval(await response.json())
+    } catch (err) {
+      setAgentApprovalError((err as Error).message)
+    } finally {
+      setAgentApprovalActionLoading(null)
+    }
+  }
+
+  async function handleRejectAgentWorkflow() {
+    if (!agentApproval || !agentRejectReason.trim()) return
+    setAgentApprovalActionLoading('reject')
+    setAgentApprovalError(null)
+    try {
+      const headers = await authHeader()
+      const response = await fetch(`${API_BASE_URL}/approvals/${agentApproval.id}/reject`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: agentRejectReason.trim() }),
+      })
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Reject failed (${response.status})`)
+      }
+      setAgentApproval(await response.json())
+      setAgentShowRejectForm(false)
+      setAgentRejectReason('')
+    } catch (err) {
+      setAgentApprovalError((err as Error).message)
+    } finally {
+      setAgentApprovalActionLoading(null)
+    }
+  }
+
+  async function handleToggleAgentHistory() {
+    const opening = !agentHistoryOpen
+    setAgentHistoryOpen(opening)
+    if (opening && result) {
+      setAgentHistoryLoading(true)
+      setAgentHistoryError(null)
+      try {
+        const headers = await authHeader()
+        const response = await fetch(`${API_BASE_URL}/agent/runs?dataset_id=${encodeURIComponent(result.dataset_id)}`, {
+          headers,
+        })
+        if (!response.ok) {
+          const errBody = await response.json().catch(() => ({}))
+          throw new Error(errBody.detail || `Failed to load history (${response.status})`)
+        }
+        const data = await response.json()
+        setAgentHistoryRuns(data.runs || [])
+      } catch (err) {
+        setAgentHistoryError((err as Error).message)
+      } finally {
+        setAgentHistoryLoading(false)
+      }
+    }
+  }
+
+  async function handleOpenHistoryRun(workflowId: string) {
+    setHistoryLoadingId(workflowId)
+    setAgentHistoryError(null)
+    setSelectedHistoryRun(null)
+    setSelectedHistoryApproval(null)
+    setHistoryShowRejectForm(false)
+    setHistoryRejectReason('')
+    try {
+      const headers = await authHeader()
+      const [runResponse, approvalResponse] = await Promise.all([
+        fetch(`${API_BASE_URL}/agent/runs/${workflowId}`, { headers }),
+        fetch(`${API_BASE_URL}/approvals/agent_workflow/${workflowId}`, { headers }),
+      ])
+      if (!runResponse.ok) {
+        const errBody = await runResponse.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Failed to load run (${runResponse.status})`)
+      }
+      setSelectedHistoryRun(await runResponse.json())
+      if (approvalResponse.ok) {
+        const approvalData = await approvalResponse.json()
+        setSelectedHistoryApproval(approvalData.versions?.[0] ?? null)
+      }
+    } catch (err) {
+      setAgentHistoryError((err as Error).message)
+    } finally {
+      setHistoryLoadingId(null)
+    }
+  }
+
+  async function handleApproveHistoryRun() {
+    if (!selectedHistoryApproval) return
+    setHistoryApprovalActionLoading('approve')
+    try {
+      const headers = await authHeader()
+      const response = await fetch(`${API_BASE_URL}/approvals/${selectedHistoryApproval.id}/approve`, {
+        method: 'POST',
+        headers,
+      })
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Approve failed (${response.status})`)
+      }
+      setSelectedHistoryApproval(await response.json())
+    } catch (err) {
+      setAgentHistoryError((err as Error).message)
+    } finally {
+      setHistoryApprovalActionLoading(null)
+    }
+  }
+
+  async function handleRejectHistoryRun() {
+    if (!selectedHistoryApproval || !historyRejectReason.trim()) return
+    setHistoryApprovalActionLoading('reject')
+    try {
+      const headers = await authHeader()
+      const response = await fetch(`${API_BASE_URL}/approvals/${selectedHistoryApproval.id}/reject`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: historyRejectReason.trim() }),
+      })
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Reject failed (${response.status})`)
+      }
+      setSelectedHistoryApproval(await response.json())
+      setHistoryShowRejectForm(false)
+      setHistoryRejectReason('')
+    } catch (err) {
+      setAgentHistoryError((err as Error).message)
+    } finally {
+      setHistoryApprovalActionLoading(null)
     }
   }
 
@@ -2090,6 +2293,217 @@ export default function UploadDataset({
               </p>
             </div>
           )}
+
+          {agentApproval && (
+            <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                  Human Approval
+                </p>
+                <span
+                  className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                    agentApproval.approval_status === 'approved'
+                      ? 'bg-emerald-900/40 text-emerald-300'
+                      : agentApproval.approval_status === 'rejected'
+                        ? 'bg-red-900/40 text-red-300'
+                        : 'bg-amber-900/40 text-amber-300'
+                  }`}
+                >
+                  {agentApproval.approval_status === 'approved'
+                    ? 'Approved'
+                    : agentApproval.approval_status === 'rejected'
+                      ? 'Rejected'
+                      : 'Pending approval'}
+                </span>
+              </div>
+
+              {agentApprovalError && <ErrorBanner message={agentApprovalError} />}
+
+              {agentApproval.approval_status === 'rejected' && agentApproval.rejection_reason && (
+                <p className="mb-2 text-xs text-red-300">Reason: {agentApproval.rejection_reason}</p>
+              )}
+
+              {agentApproval.approval_status === 'pending' && !agentShowRejectForm && (
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleApproveAgentWorkflow}
+                    disabled={agentApprovalActionLoading !== null}
+                    className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {agentApprovalActionLoading === 'approve' ? 'Approving…' : 'Approve'}
+                  </button>
+                  <button
+                    onClick={() => setAgentShowRejectForm(true)}
+                    disabled={agentApprovalActionLoading !== null}
+                    className="rounded-lg border border-red-800 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-red-950/40 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    Reject
+                  </button>
+                </div>
+              )}
+
+              {agentApproval.approval_status === 'pending' && agentShowRejectForm && (
+                <div className="space-y-2">
+                  <textarea
+                    value={agentRejectReason}
+                    onChange={(e) => setAgentRejectReason(e.target.value)}
+                    rows={2}
+                    placeholder="Why is this being rejected?"
+                    className="w-full rounded-md border border-slate-700 bg-slate-950 p-2 text-sm text-slate-100 focus:border-red-600 focus:outline-none"
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleRejectAgentWorkflow}
+                      disabled={agentApprovalActionLoading !== null || !agentRejectReason.trim()}
+                      className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {agentApprovalActionLoading === 'reject' ? 'Rejecting…' : 'Confirm reject'}
+                    </button>
+                    <button
+                      onClick={() => { setAgentShowRejectForm(false); setAgentRejectReason('') }}
+                      className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ---------- Run history ---------- */}
+          <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+            <button
+              onClick={handleToggleAgentHistory}
+              className="flex w-full items-center justify-between text-left"
+            >
+              <p className="text-sm font-semibold text-slate-100">Run History</p>
+              <span className="text-xs text-slate-400">{agentHistoryOpen ? 'Hide' : 'Show'}</span>
+            </button>
+
+            {agentHistoryOpen && (
+              <div className="mt-3 space-y-3">
+                {agentHistoryError && <ErrorBanner message={agentHistoryError} />}
+                {agentHistoryLoading && <p className="text-xs text-slate-500">Loading…</p>}
+                {!agentHistoryLoading && agentHistoryRuns.length === 0 && (
+                  <p className="text-xs text-slate-500">No past runs for this dataset yet.</p>
+                )}
+                {agentHistoryRuns.length > 0 && (
+                  <ul className="space-y-1">
+                    {agentHistoryRuns.map((run) => (
+                      <li key={run.workflow_id}>
+                        <button
+                          onClick={() => handleOpenHistoryRun(run.workflow_id)}
+                          disabled={historyLoadingId === run.workflow_id}
+                          className="w-full rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2 text-left text-xs hover:border-cyan-700 disabled:opacity-60"
+                        >
+                          <p className="font-medium text-slate-200">{run.user_query || run.goal || 'Untitled run'}</p>
+                          <p className="text-slate-500">
+                            {new Date(run.created_at).toLocaleString()} · {run.status}
+                          </p>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                {selectedHistoryRun && (
+                  <div className="rounded-xl border border-slate-700 bg-slate-950/60 p-4">
+                    <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">
+                      {selectedHistoryRun.user_query}
+                    </p>
+                    {selectedHistoryRun.state.final_output?.summary && (
+                      <p className="text-sm text-slate-100">{selectedHistoryRun.state.final_output.summary}</p>
+                    )}
+                    {selectedHistoryRun.state.final_output?.recommendation && (
+                      <p className="mt-2 text-sm text-slate-300">
+                        <span className="font-medium text-slate-200">Recommendation: </span>
+                        {selectedHistoryRun.state.final_output.recommendation}
+                      </p>
+                    )}
+                    <p className="mt-2 text-xs text-slate-500">
+                      {new Date(selectedHistoryRun.created_at).toLocaleString()} · {selectedHistoryRun.status}
+                    </p>
+
+                    {selectedHistoryApproval && (
+                      <div className="mt-3 border-t border-slate-800 pt-3">
+                        <div className="mb-2 flex items-center justify-between gap-3">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                            Human Approval
+                          </p>
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                              selectedHistoryApproval.approval_status === 'approved'
+                                ? 'bg-emerald-900/40 text-emerald-300'
+                                : selectedHistoryApproval.approval_status === 'rejected'
+                                  ? 'bg-red-900/40 text-red-300'
+                                  : 'bg-amber-900/40 text-amber-300'
+                            }`}
+                          >
+                            {selectedHistoryApproval.approval_status === 'approved'
+                              ? 'Approved'
+                              : selectedHistoryApproval.approval_status === 'rejected'
+                                ? 'Rejected'
+                                : 'Pending approval'}
+                          </span>
+                        </div>
+
+                        {selectedHistoryApproval.approval_status === 'rejected' && selectedHistoryApproval.rejection_reason && (
+                          <p className="mb-2 text-xs text-red-300">Reason: {selectedHistoryApproval.rejection_reason}</p>
+                        )}
+
+                        {selectedHistoryApproval.approval_status === 'pending' && !historyShowRejectForm && (
+                          <div className="flex gap-2">
+                            <button
+                              onClick={handleApproveHistoryRun}
+                              disabled={historyApprovalActionLoading !== null}
+                              className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              {historyApprovalActionLoading === 'approve' ? 'Approving…' : 'Approve'}
+                            </button>
+                            <button
+                              onClick={() => setHistoryShowRejectForm(true)}
+                              disabled={historyApprovalActionLoading !== null}
+                              className="rounded-lg border border-red-800 px-3 py-1.5 text-xs font-medium text-red-300 hover:bg-red-950/40 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              Reject
+                            </button>
+                          </div>
+                        )}
+
+                        {selectedHistoryApproval.approval_status === 'pending' && historyShowRejectForm && (
+                          <div className="space-y-2">
+                            <textarea
+                              value={historyRejectReason}
+                              onChange={(e) => setHistoryRejectReason(e.target.value)}
+                              rows={2}
+                              placeholder="Why is this being rejected?"
+                              className="w-full rounded-md border border-slate-700 bg-slate-950 p-2 text-sm text-slate-100 focus:border-red-600 focus:outline-none"
+                            />
+                            <div className="flex gap-2">
+                              <button
+                                onClick={handleRejectHistoryRun}
+                                disabled={historyApprovalActionLoading !== null || !historyRejectReason.trim()}
+                                className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                {historyApprovalActionLoading === 'reject' ? 'Rejecting…' : 'Confirm reject'}
+                              </button>
+                              <button
+                                onClick={() => { setHistoryShowRejectForm(false); setHistoryRejectReason('') }}
+                                className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       )}
 

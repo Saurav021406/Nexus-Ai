@@ -38,6 +38,8 @@ merged 3-way answer can't represent - see that file's docstring.
 from __future__ import annotations
 
 import json
+import random
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
@@ -117,6 +119,31 @@ _PROVIDERS = {
     "minimax": _call_minimax,
 }
 
+# nvidia and minimax are both served through the SAME NVIDIA API key/account
+# (see _minimax_client's docstring above) and get fired at the exact same
+# instant by the thread pool below - that doubles the burst load against one
+# account's rate limit every single consensus call, which is what was
+# actually causing the frequent "429 Too Many Requests" / "Request timed
+# out" failures for minimax. A small retry-with-backoff naturally destaggers
+# the retry away from that same-instant collision, without needing to move
+# minimax to a different provider/account.
+_RETRYABLE_MARKERS = ("429", "too many requests", "timed out", "timeout", "rate limit")
+
+
+def _call_with_retry(fn, prompt: str, temperature: float, max_tokens: int, *, retries: int = 2) -> str:
+    last_error: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            return fn(prompt, temperature, max_tokens)
+        except Exception as e:
+            last_error = e
+            is_retryable = any(marker in str(e).lower() for marker in _RETRYABLE_MARKERS)
+            if not is_retryable or attempt == retries:
+                raise
+            delay = (2 ** attempt) + random.uniform(0, 0.5)  # 1-1.5s, then 2-2.5s
+            time.sleep(delay)
+    raise last_error  # pragma: no cover - loop always returns or raises above
+
 # Stable display/tie-break order, independent of which finishes first.
 _ORDER = {"minimax": 0, "nvidia": 1, "groq": 2}
 
@@ -177,7 +204,8 @@ def _query_all_models(prompt: str, temperature: float, max_tokens: int) -> list[
     answers: list[ModelAnswer] = []
     with ThreadPoolExecutor(max_workers=3) as pool:
         future_to_name = {
-            pool.submit(fn, prompt, temperature, max_tokens): name for name, fn in _PROVIDERS.items()
+            pool.submit(_call_with_retry, fn, prompt, temperature, max_tokens): name
+            for name, fn in _PROVIDERS.items()
         }
         for future in as_completed(future_to_name):
             name = future_to_name[future]
@@ -371,10 +399,37 @@ def get_consensus_json(prompt: str, *, temperature: float = 0.7, max_tokens: int
     stripping ```json code fences, since every provider here occasionally
     adds them anyway) and attaches consensus metadata under a "_consensus"
     key so callers can surface it without colliding with the model's own
-    JSON fields."""
+    JSON fields.
+
+    Some models occasionally add a conversational preamble/postamble around
+    the JSON despite being told not to (e.g. "Here's the analysis:\n{...}")
+    - a bare json.loads() on that raises "Expecting value: line 1 column 1
+    (char 0)", which is unhelpful and was showing up as a raw crash message
+    in the UI. This extracts the {...} substring as a fallback before
+    giving up, and raises a clear, specific error (with the actual raw text
+    included) only if that also fails - callers already wrap this in their
+    own try/except with safe defaults, so a clear message here matters more
+    than the exception type."""
     result = get_consensus(prompt, temperature=temperature, max_tokens=max_tokens)
     text = result.answer.replace("```json", "").replace("```", "").strip()
-    parsed = json.loads(text)
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                parsed = json.loads(text[start : end + 1])
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"Consensus answer was not valid JSON even after extraction attempt: {e}. "
+                    f"Raw answer (first 200 chars): {text[:200]!r}"
+                ) from e
+        else:
+            raise ValueError(
+                f"Consensus answer contained no JSON object. Raw answer (first 200 chars): {text[:200]!r}"
+            )
+
     if isinstance(parsed, dict):
         parsed["_consensus"] = result.to_meta_dict()
     return parsed

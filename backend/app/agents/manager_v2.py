@@ -25,11 +25,12 @@ from pydantic import BaseModel, Field
 
 from app.agents.executor import execute_plan
 from app.agents.events import EventEmitter, NOOP_EMIT
+from app.agents.input_security import input_security_check
 from app.agents.model_provider import get_nexus_model
 from app.agents.planner import validate_and_order_plan
 from app.agents.reviewer import review_check
 from app.agents.security import security_check
-from app.agents.registry import get_agent, available_agent_domains, list_capabilities
+from app.agents.registry import get_agent, get_agent_definition, available_agent_domains, list_capabilities
 from app.agents.state import WorkflowState
 from app.agents.tracing import add_trace
 
@@ -105,6 +106,42 @@ async def run_manager_v2(state: WorkflowState, emit: EventEmitter = NOOP_EMIT) -
     add_trace(state, "Manager", "start", input_data={"user_query": state.user_query})
     await emit("manager_start", "Manager", "Understanding your request...", None)
 
+    # ---------- 0. Input Security (Section 23) - runs BEFORE the Manager
+    # plans or delegates anything. If this blocks, nothing below it - not
+    # the Manager LLM, not any specialist - ever runs for this request. ----------
+    await emit("input_security_start", "InputSecurity", "Screening your request...", None)
+    try:
+        input_check = await asyncio.to_thread(input_security_check, state.user_query, state)
+    except Exception as e:
+        # Fail SAFE, not open: if the security check itself is broken, block
+        # rather than silently letting an unscreened query through.
+        add_trace(state, "InputSecurity", "check_failed", error=str(e))
+        input_check = {"risk_level": "high", "findings": [f"Input security check failed: {e}"], "blocked": True}
+
+    add_trace(state, "InputSecurity", "completed", output_data=input_check)
+
+    if input_check.get("blocked"):
+        await emit("input_security_blocked", "InputSecurity", "Request blocked by input security", input_check)
+        state.security = input_check
+        state.status = "blocked"
+        state.final_output = {
+            "workflow_id": state.workflow_id,
+            "user_query": state.user_query,
+            "goal": "",
+            "error": "This request was blocked by input security and was not processed.",
+            "findings": input_check.get("findings", []),
+            "summary": "",
+            "key_metrics": [],
+            "recommendation": "",
+            "participating_agents": [],
+            "specialist_reports": [],
+        }
+        state.touch()
+        await emit("finished", "Manager", "Blocked", {"status": state.status})
+        return state
+
+    await emit("input_security_passed", "InputSecurity", "Request cleared for processing", input_check)
+
     # ---------- 1. Planning ----------
     manager_agent = _build_manager_agent()
     try:
@@ -170,7 +207,15 @@ async def run_manager_v2(state: WorkflowState, emit: EventEmitter = NOOP_EMIT) -
         # of what was asked. Passing task["task"] (falls back to the raw user
         # query if a specialist doesn't support it) closes that gap.
         task_description = task.get("task") or state.user_query or ""
-        output = await asyncio.to_thread(agent_fn, state.data_summary, task_description)
+
+        definition = get_agent_definition(task["agent"])
+        if definition and definition.needs_full_access:
+            # SQL Agent (and any future agent needing real dataset access,
+            # not just the text summary) gets the whole state instead.
+            output = await asyncio.to_thread(agent_fn, state, task_description)
+        else:
+            output = await asyncio.to_thread(agent_fn, state.data_summary, task_description)
+
         if not isinstance(output, dict):
             return {"error": "Specialist returned invalid format"}
         return output

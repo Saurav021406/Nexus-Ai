@@ -6,10 +6,11 @@ analysis" tab are completely untouched and keep working exactly as before.
 over an actual free-text user_query instead of pure domain routing.
 
 Currently synchronous - it runs the full workflow and returns the final
-result in one request/response, same as /domain/analyze does today. Async
-polling (GET /agent/runs/{workflow_id}) and persistence to Supabase are
-later steps (Section 28/31) once the Task Planner/Executor exist and
-workflows can genuinely run long enough to need polling.
+result in one request/response (plus streams live progress via
+/agent/run/stream, see below). Every completed run is persisted to Supabase
+(services/workflow_runs.py, Section 28) and gets a pending Human Approval
+entry (services/approvals.py) - GET /agent/runs and GET /agent/runs/{id}
+let a past run be looked back up later, per Section 31.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from app.deps import get_current_user
 from app.services import approvals
 from app.services.datasets import build_data_summary, get_dataset_dataframe, get_dataset_record
 from app.services.domain_router import classify_dataset
+from app.services.workflow_runs import get_workflow_run, list_workflow_runs, save_workflow_run
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -77,6 +79,31 @@ def _create_pending_approval(final_state: WorkflowState, user_id: str) -> dict |
         return None
 
 
+def _persist_workflow_run(final_state: WorkflowState) -> None:
+    """Workflow persistence (Section 28). Same non-blocking pattern as
+    _create_pending_approval above - a workflow that ran and answered
+    correctly should never come back as an error to the user just because
+    saving its history entry failed."""
+    try:
+        save_workflow_run(final_state)
+    except Exception as e:
+        print(f"Could not persist workflow run {final_state.workflow_id}: {e}")
+
+
+@router.get("/runs")
+async def get_agent_runs(dataset_id: str | None = None, limit: int = 20, user=Depends(get_current_user)):
+    runs = await run_in_threadpool(list_workflow_runs, user.id, dataset_id, limit)
+    return {"runs": runs}
+
+
+@router.get("/runs/{workflow_id}")
+async def get_agent_run(workflow_id: str, user=Depends(get_current_user)):
+    run = await run_in_threadpool(get_workflow_run, workflow_id, user.id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    return run
+
+
 @router.post("/run")
 async def run_agent(payload: AgentRunRequest, user=Depends(get_current_user)):
     if not payload.query.strip():
@@ -89,6 +116,7 @@ async def run_agent(payload: AgentRunRequest, user=Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="Manager produced no output")
 
     approval = _create_pending_approval(final_state, user.id)
+    await run_in_threadpool(_persist_workflow_run, final_state)
 
     return {
         "workflow_id": final_state.workflow_id,
@@ -123,6 +151,7 @@ async def run_agent_stream(payload: AgentRunRequest, user=Depends(get_current_us
         try:
             final_state = await run_manager_v2(state, emit)
             approval = _create_pending_approval(final_state, state.user_id)
+            await run_in_threadpool(_persist_workflow_run, final_state)
             await queue.put({
                 "type": "__done__",
                 "workflow_id": final_state.workflow_id,

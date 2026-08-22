@@ -133,14 +133,18 @@ async def upload_dataset(
 
 
 @router.get("")
-async def list_datasets(user=Depends(get_current_user)):
-    """Dataset history - only ever returns datasets owned by the current user."""
+async def list_datasets(limit: int = 10, user=Depends(get_current_user)):
+    """Dataset history - only ever returns datasets owned by the current
+    user, most recent first. Capped at `limit` (default 10) so this list
+    doesn't grow unbounded as someone re-uploads/tests the same file
+    repeatedly - older uploads are still in Supabase, just not shown here."""
     try:
         result = (
             supabase_admin.table("datasets")
             .select("id, filename, row_count, column_count, created_at")
             .eq("user_id", user.id)
             .order("created_at", desc=True)
+            .limit(limit)
             .execute()
         )
         return result.data
