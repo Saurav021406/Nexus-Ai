@@ -35,6 +35,7 @@ class ToolPermission(str, Enum):
     READ_ONLY = "READ_ONLY"
     WRITE = "WRITE"
     DANGEROUS = "DANGEROUS"
+    EXTERNAL_ACTION = "EXTERNAL_ACTION"  # leaves Nexus entirely (Section 7/18) - e.g. Windmill
 
 
 class ToolCallError(Exception):
@@ -191,6 +192,12 @@ def _execute_read_only_query(dataset_id: str, user_id: str, sql_query: str, max_
         conn.close()
 
 
+def _trigger_windmill_workflow(script_path: str, payload: dict) -> dict:
+    from app.services.windmill_client import trigger_windmill_workflow
+
+    return trigger_windmill_workflow(script_path, payload)
+
+
 TOOL_REGISTRY: dict[str, Tool] = {
     "pii_scan": Tool(
         name="pii_scan",
@@ -236,6 +243,19 @@ TOOL_REGISTRY: dict[str, Tool] = {
         ),
         fn=_execute_read_only_query,
         permission=ToolPermission.READ_ONLY,
+    ),
+    "trigger_windmill_workflow": Tool(
+        name="trigger_windmill_workflow",
+        description=(
+            "Triggers an external automation (email, Slack, CRM, scheduled jobs, etc.) via "
+            "Windmill. EXTERNAL_ACTION - deliberately not attached to any agent's tool list, "
+            "so no agent can call this mid-reasoning-loop. Only reachable through "
+            "POST /automation/trigger (routers/automation.py), which requires the referenced "
+            "content to already be human-approved before Windmill is ever contacted. Listed "
+            "here for registry completeness (Section 17), not for agent use."
+        ),
+        fn=_trigger_windmill_workflow,
+        permission=ToolPermission.EXTERNAL_ACTION,
     ),
 }
 

@@ -14,7 +14,7 @@ instead of a plain dict literal.
 from dataclasses import dataclass, field
 from typing import Callable
 
-from app.agents import business_analyst, data_engineer, data_scientist, education, finance, generic, healthcare, hr, ml_engineer, retail, sql_agent, visualization_agent
+from app.agents import business_analyst, data_engineer, data_scientist, education, finance, generic, healthcare, hr, ml_engineer, research_agent, retail, sql_agent, visualization_agent
 from app.agents.tools import list_tools
 
 
@@ -148,6 +148,18 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
         input_schema="full WorkflowState (needs dataset_id/user_id, not just data_summary)",
         output_schema="{summary, key_metrics, recommendation, sql_query, columns, row_count}",
         needs_full_access=True,
+    ),
+    "Research": AgentDefinition(
+        name="Research",
+        description=(
+            "Answers research/background-context questions using general knowledge. "
+            "NOT grounded in any retrieved document or source yet - that's Phase 6 RAG. "
+            "Every answer is explicitly flagged as ungrounded (grounded=False)."
+        ),
+        fn=research_agent.analyze,
+        capabilities=["general_knowledge_research"],
+        tools=["get_statistics", "load_dataset_sample"],
+        output_schema="{summary, key_metrics, recommendation, grounded}",
     ),
 }
 

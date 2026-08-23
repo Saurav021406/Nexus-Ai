@@ -8,7 +8,7 @@ from app.agents.registry import (
 EXPECTED_AGENTS = {
     "Education", "Retail", "Finance", "HR", "Healthcare", "General",
     "Data Engineer", "Data Scientist", "ML Engineer", "Business Analyst",
-    "Visualization", "SQL",
+    "Visualization", "SQL", "Research",
 }
 
 
