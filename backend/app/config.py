@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     nvidia_api_key: str = ""
     groq_api_key: str = ""
+    windmill_base_url: str = ""
+    windmill_token: str = ""
+    windmill_workspace: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
