@@ -46,6 +46,7 @@ class WorkflowState:
     approvals: list[dict] = field(default_factory=list)
     errors: list[dict] = field(default_factory=list)
     status: str = "running"  # running | awaiting_approval | completed | failed
+    replan_count: int = 0  # Section 21: how many times the Manager revised its plan after a review rejection
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 

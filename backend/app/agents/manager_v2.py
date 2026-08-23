@@ -76,8 +76,17 @@ def _build_manager_agent() -> Agent:
     )
 
 
-def _build_planning_input(state: WorkflowState) -> str:
+def _build_planning_input(state: WorkflowState, replan_feedback: dict | None = None) -> str:
     registry_snapshot = list_capabilities()
+    feedback_block = ""
+    if replan_feedback:
+        feedback_block = f"""
+YOUR PREVIOUS PLAN WAS REVIEWED AND REJECTED. Do not repeat the same plan -
+address these specific problems:
+
+Issues found: {json.dumps(replan_feedback.get("issues", []), default=str)}
+Suggested improvements: {json.dumps(replan_feedback.get("suggested_improvements", []), default=str)}
+"""
     return f"""USER REQUEST:
 {state.user_query}
 
@@ -90,7 +99,7 @@ DATA SUMMARY (privacy-filtered):
 
 AVAILABLE AGENTS:
 {json.dumps(registry_snapshot, indent=2, default=str)}
-"""
+{feedback_block}"""
 
 
 async def run_manager_v2(state: WorkflowState, emit: EventEmitter = NOOP_EMIT) -> WorkflowState:
@@ -142,129 +151,175 @@ async def run_manager_v2(state: WorkflowState, emit: EventEmitter = NOOP_EMIT) -
 
     await emit("input_security_passed", "InputSecurity", "Request cleared for processing", input_check)
 
-    # ---------- 1. Planning ----------
-    manager_agent = _build_manager_agent()
-    try:
-        result = await Runner.run(manager_agent, _build_planning_input(state))
-        agent_plan: AgentPlan = result.final_output
-    except Exception as e:
-        state.add_error("Manager", f"Planning failed: {e}")
-        add_trace(state, "Manager", "planning_failed", error=str(e))
-        await emit("manager_planning_failed", "Manager", "Planning failed, using fallback plan", {"error": str(e)})
-        # Safe fallback: fall back to the primary detected domain as a single task,
-        # so a planning-model hiccup doesn't take down the whole request.
-        fallback_domain = state.classification.get("primary_domain", "General")
-        agent_plan = AgentPlan(
-            goal=state.user_query or "Analyze the dataset",
-            reasoning="Planning model unavailable - falling back to detected domain.",
-            tasks=[PlannedTask(id="t1", agent=fallback_domain, task="full_analysis", depends_on=[])],
+    # ---------- 1-4. Planning -> Execution -> Review, with replanning
+    # (Section 21: "If rejected: Reviewer -> Failure reason -> Manager ->
+    # Replan -> Retry"). Bounded at MAX_REPLAN_ATTEMPTS extra tries so a
+    # persistently-rejected plan can never loop forever (Section 25). ----------
+    MAX_REPLAN_ATTEMPTS = 1
+    replan_feedback: dict | None = None
+
+    for attempt in range(MAX_REPLAN_ATTEMPTS + 1):
+        is_replan = attempt > 0
+        if is_replan:
+            state.replan_count += 1
+            add_trace(state, "Manager", "replanning", input_data=replan_feedback)
+            await emit(
+                "manager_replanning", "Manager",
+                f"Revising the plan (attempt {attempt + 1}) based on reviewer feedback...",
+                replan_feedback,
+            )
+
+        # ---------- 1. Planning ----------
+        manager_agent = _build_manager_agent()
+        try:
+            planning_input = _build_planning_input(state, replan_feedback if is_replan else None)
+            result = await Runner.run(manager_agent, planning_input)
+            agent_plan: AgentPlan = result.final_output
+        except Exception as e:
+            state.add_error("Manager", f"Planning failed: {e}")
+            add_trace(state, "Manager", "planning_failed", error=str(e))
+            await emit("manager_planning_failed", "Manager", "Planning failed, using fallback plan", {"error": str(e)})
+            # Safe fallback: fall back to the primary detected domain as a single task,
+            # so a planning-model hiccup doesn't take down the whole request.
+            fallback_domain = state.classification.get("primary_domain", "General")
+            agent_plan = AgentPlan(
+                goal=state.user_query or "Analyze the dataset",
+                reasoning="Planning model unavailable - falling back to detected domain.",
+                tasks=[PlannedTask(id="t1", agent=fallback_domain, task="full_analysis", depends_on=[])],
+            )
+
+        state.goal = agent_plan.goal
+        state.plan = [
+            {"step": i + 1, "agent": t.agent, "task": t.task} for i, t in enumerate(agent_plan.tasks)
+        ]
+        add_trace(
+            state, "Manager", "plan_created",
+            output_data={"goal": state.goal, "tasks": [t.model_dump() for t in agent_plan.tasks]},
+        )
+        await emit("plan_created", "Manager", f"Plan: {state.goal}",
+                    {"tasks": [t.model_dump() for t in agent_plan.tasks]})
+
+        # ---------- 2. Task Planning (validate + order into dependency waves) ----------
+        plan_result = validate_and_order_plan(agent_plan.tasks, available_agent_domains())
+
+        if not plan_result.valid:
+            state.add_error("Planner", "; ".join(plan_result.errors))
+            add_trace(state, "Planner", "validation_failed", error="; ".join(plan_result.errors))
+            await emit("planner_validation_failed", "Planner", "Plan invalid, using fallback",
+                        {"errors": plan_result.errors})
+            # Same safety net as a planning failure: fall back to one task on
+            # the detected primary domain rather than failing the whole request.
+            fallback_domain = state.classification.get("primary_domain", "General")
+            plan_result = validate_and_order_plan(
+                [PlannedTask(id="t1", agent=fallback_domain, task="full_analysis", depends_on=[])],
+                available_agent_domains(),
+            )
+
+        add_trace(
+            state, "Planner", "plan_ordered",
+            output_data={"wave_count": len(plan_result.waves), "waves": [
+                [t["id"] for t in wave] for wave in plan_result.waves
+            ]},
+        )
+        await emit("plan_ordered", "Planner", f"Ordered into {len(plan_result.waves)} execution wave(s)",
+                    {"waves": [[t["id"] for t in wave] for wave in plan_result.waves]})
+
+        # ---------- 3. Task Execution (dependency-respecting, wave by wave) ----------
+        async def run_specialist_task(task: dict, state: WorkflowState) -> dict:
+            agent_fn = get_agent(task["agent"])
+            if not agent_fn:
+                return {"error": f"{task['agent']} specialist is not installed"}
+            # BUGFIX: specialists used to only ever see state.data_summary, never
+            # the user's actual question or the Manager's planned task for them -
+            # so every run produced the same generic dataset overview regardless
+            # of what was asked. Passing task["task"] (falls back to the raw user
+            # query if a specialist doesn't support it) closes that gap.
+            task_description = task.get("task") or state.user_query or ""
+
+            definition = get_agent_definition(task["agent"])
+            if definition and definition.needs_full_access:
+                # SQL Agent (and any future agent needing real dataset access,
+                # not just the text summary) gets the whole state instead.
+                output = await asyncio.to_thread(agent_fn, state, task_description)
+            else:
+                output = await asyncio.to_thread(agent_fn, state.data_summary, task_description)
+
+            if not isinstance(output, dict):
+                return {"error": "Specialist returned invalid format"}
+            return output
+
+        # A replanned attempt starts from a clean slate - a stale result from
+        # a REJECTED attempt must never linger into the final synthesis just
+        # because the new plan happened not to re-select that same agent.
+        state.specialist_results = {}
+        await execute_plan(state, plan_result.waves, run_specialist_task, emit)
+
+        # ---------- 4. Reviewer + Security (independent agents, run in
+        # PARALLEL - neither depends on the other's output, so there's no
+        # reason to pay for two sequential consensus round-trips here) ----------
+        await emit("reviewer_check_start", "Reviewer", "Reviewing specialist reports for accuracy and consistency...", None)
+        await emit("security_check_start", "Security", "Running security and PII checks...", None)
+
+        review_task = asyncio.to_thread(review_check, state)
+        security_task = asyncio.to_thread(security_check, state)
+        review_result, security_result = await asyncio.gather(
+            review_task, security_task, return_exceptions=True
         )
 
-    state.goal = agent_plan.goal
-    state.plan = [
-        {"step": i + 1, "agent": t.agent, "task": t.task} for i, t in enumerate(agent_plan.tasks)
-    ]
-    add_trace(
-        state, "Manager", "plan_created",
-        output_data={"goal": state.goal, "tasks": [t.model_dump() for t in agent_plan.tasks]},
-    )
-    await emit("plan_created", "Manager", f"Plan: {state.goal}",
-                {"tasks": [t.model_dump() for t in agent_plan.tasks]})
-
-    # ---------- 2. Task Planning (validate + order into dependency waves) ----------
-    plan_result = validate_and_order_plan(agent_plan.tasks, available_agent_domains())
-
-    if not plan_result.valid:
-        state.add_error("Planner", "; ".join(plan_result.errors))
-        add_trace(state, "Planner", "validation_failed", error="; ".join(plan_result.errors))
-        await emit("planner_validation_failed", "Planner", "Plan invalid, using fallback",
-                    {"errors": plan_result.errors})
-        # Same safety net as a planning failure: fall back to one task on
-        # the detected primary domain rather than failing the whole request.
-        fallback_domain = state.classification.get("primary_domain", "General")
-        plan_result = validate_and_order_plan(
-            [PlannedTask(id="t1", agent=fallback_domain, task="full_analysis", depends_on=[])],
-            available_agent_domains(),
-        )
-
-    add_trace(
-        state, "Planner", "plan_ordered",
-        output_data={"wave_count": len(plan_result.waves), "waves": [
-            [t["id"] for t in wave] for wave in plan_result.waves
-        ]},
-    )
-    await emit("plan_ordered", "Planner", f"Ordered into {len(plan_result.waves)} execution wave(s)",
-                {"waves": [[t["id"] for t in wave] for wave in plan_result.waves]})
-
-    # ---------- 3. Task Execution (dependency-respecting, wave by wave) ----------
-    async def run_specialist_task(task: dict, state: WorkflowState) -> dict:
-        agent_fn = get_agent(task["agent"])
-        if not agent_fn:
-            return {"error": f"{task['agent']} specialist is not installed"}
-        # BUGFIX: specialists used to only ever see state.data_summary, never
-        # the user's actual question or the Manager's planned task for them -
-        # so every run produced the same generic dataset overview regardless
-        # of what was asked. Passing task["task"] (falls back to the raw user
-        # query if a specialist doesn't support it) closes that gap.
-        task_description = task.get("task") or state.user_query or ""
-
-        definition = get_agent_definition(task["agent"])
-        if definition and definition.needs_full_access:
-            # SQL Agent (and any future agent needing real dataset access,
-            # not just the text summary) gets the whole state instead.
-            output = await asyncio.to_thread(agent_fn, state, task_description)
+        if isinstance(review_result, Exception):
+            state.review = {
+                "overall_quality": "medium",
+                "issues": [f"Reviewer failed: {str(review_result)}"],
+                "approved": True,
+                "suggested_improvements": [],
+            }
+            add_trace(state, "Reviewer", "failed", error=str(review_result))
+            await emit("reviewer_check_failed", "Reviewer", "Review failed, using safe defaults", {"error": str(review_result)})
         else:
-            output = await asyncio.to_thread(agent_fn, state.data_summary, task_description)
+            state.review = review_result
+            add_trace(state, "Reviewer", "completed", output_data=state.review)
+            await emit("reviewer_check_completed", "Reviewer", "Review complete", state.review)
 
-        if not isinstance(output, dict):
-            return {"error": "Specialist returned invalid format"}
-        return output
+        if isinstance(security_result, Exception):
+            state.security = {
+                "risk_level": "medium",
+                "findings": [f"Security agent failed: {str(security_result)}"],
+                "blocked": False,
+                "safe_to_show": True,
+            }
+            add_trace(state, "Security", "failed", error=str(security_result))
+            await emit("security_check_failed", "Security", "Security checks failed, using safe defaults", {"error": str(security_result)})
+        else:
+            state.security = security_result
+            add_trace(state, "Security", "completed", output_data=state.security)
+            await emit("security_check_completed", "Security", "Security checks complete", state.security)
 
-    await execute_plan(state, plan_result.waves, run_specialist_task, emit)
+        # ---------- Replan decision ----------
+        if state.review.get("approved", True):
+            break  # good result (or safe-default review) - stop looping
 
-    # ---------- 4. Reviewer + Security (independent agents, run in
-    # PARALLEL - neither depends on the other's output, so there's no
-    # reason to pay for two sequential consensus round-trips here) ----------
-    await emit("reviewer_check_start", "Reviewer", "Reviewing specialist reports for accuracy and consistency...", None)
-    await emit("security_check_start", "Security", "Running security and PII checks...", None)
-
-    review_task = asyncio.to_thread(review_check, state)
-    security_task = asyncio.to_thread(security_check, state)
-    review_result, security_result = await asyncio.gather(
-        review_task, security_task, return_exceptions=True
-    )
-
-    if isinstance(review_result, Exception):
-        state.review = {
-            "overall_quality": "medium",
-            "issues": [f"Reviewer failed: {str(review_result)}"],
-            "approved": True,
-            "suggested_improvements": [],
-        }
-        add_trace(state, "Reviewer", "failed", error=str(review_result))
-        await emit("reviewer_check_failed", "Reviewer", "Review failed, using safe defaults", {"error": str(review_result)})
-    else:
-        state.review = review_result
-        add_trace(state, "Reviewer", "completed", output_data=state.review)
-        await emit("reviewer_check_completed", "Reviewer", "Review complete", state.review)
-
-    if isinstance(security_result, Exception):
-        state.security = {
-            "risk_level": "medium",
-            "findings": [f"Security agent failed: {str(security_result)}"],
-            "blocked": False,
-            "safe_to_show": True,
-        }
-        add_trace(state, "Security", "failed", error=str(security_result))
-        await emit("security_check_failed", "Security", "Security checks failed, using safe defaults", {"error": str(security_result)})
-    else:
-        state.security = security_result
-        add_trace(state, "Security", "completed", output_data=state.security)
-        await emit("security_check_completed", "Security", "Security checks complete", state.security)
+        if attempt < MAX_REPLAN_ATTEMPTS:
+            replan_feedback = {
+                "issues": state.review.get("issues", []),
+                "suggested_improvements": state.review.get("suggested_improvements", []),
+            }
+            add_trace(state, "Manager", "replan_triggered", output_data=replan_feedback)
+            await emit("manager_replan_triggered", "Manager", "Review rejected the result - replanning...", replan_feedback)
+        else:
+            add_trace(state, "Manager", "replan_exhausted")
+            await emit(
+                "manager_replan_exhausted", "Manager",
+                "Still not approved after replanning - proceeding with the best available result", None,
+            )
 
     # ---------- 5. Final synthesis ----------
     state.final_output = _synthesize(state)
-    state.status = "completed" if not state.errors else "completed_with_errors"
+    # Status reflects the FINAL attempt's outcome, not the cumulative error
+    # log across every replan - a replan that fixed the problem should be
+    # able to report "completed", even though state.errors (the full audit
+    # trail) still shows the earlier rejected attempt's errors.
+    final_attempt_had_errors = any("error" in v for v in state.specialist_results.values())
+    state.status = "completed_with_errors" if final_attempt_had_errors else "completed"
     state.touch()
     add_trace(state, "Manager", "finished")
     await emit("finished", "Manager", "Done", {"status": state.status})
@@ -286,6 +341,7 @@ def _synthesize(state: WorkflowState) -> dict[str, Any]:
         "security": state.security,
         "traces": state.traces,
         "errors": state.errors,
+        "replan_count": state.replan_count,
     }
 
     if not successful:
