@@ -12,6 +12,8 @@ status, this rejects before Windmill is even contacted.
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -63,7 +65,12 @@ async def trigger_automation(payload: TriggerRequest, user=Depends(get_current_u
     }
 
     try:
-        result = trigger_windmill_workflow(payload.script_path, windmill_payload)
+        # trigger_windmill_workflow() uses blocking httpx.post() internally
+        # (up to 30s timeout) - without to_thread, this would freeze the
+        # ENTIRE FastAPI event loop for every other request while waiting on
+        # Windmill, the same way every other slow call in this codebase
+        # (specialists, reviewer, security, input security) is offloaded.
+        result = await asyncio.to_thread(trigger_windmill_workflow, payload.script_path, windmill_payload)
     except WindmillNotConfiguredError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except httpx.HTTPStatusError as e:

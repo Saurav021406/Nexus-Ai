@@ -30,8 +30,14 @@ def _base_layout(title: str | None) -> dict:
         paper_bgcolor=BG_COLOR,
         plot_bgcolor=BG_COLOR,
         font=dict(color=TEXT_COLOR, size=12),
-        xaxis=dict(gridcolor=GRID_COLOR, zerolinecolor=GRID_COLOR),
-        yaxis=dict(gridcolor=GRID_COLOR, zerolinecolor=GRID_COLOR),
+        # automargin=True is the fix for long tick labels (e.g. "Intimate
+        # Partners" on a correlation heatmap) crushing the actual plot area
+        # down to a sliver - without it, Plotly keeps the fixed margin below
+        # regardless of how much space labels actually need, so long labels
+        # visually eat into the plotting area instead of the layout growing
+        # to fit them.
+        xaxis=dict(gridcolor=GRID_COLOR, zerolinecolor=GRID_COLOR, automargin=True),
+        yaxis=dict(gridcolor=GRID_COLOR, zerolinecolor=GRID_COLOR, automargin=True),
         margin=dict(l=50, r=30, t=50, b=50),
         legend=dict(font=dict(color=TEXT_COLOR)),
     )
@@ -210,7 +216,13 @@ def generate_chart(
             )
         )
         fig.update_layout(**_base_layout(title or "Correlation heatmap"))
-        fig.update_xaxes(tickangle=-45)
+        # Extra margin on top of automargin - correlation heatmaps have the
+        # worst-case label situation (long column names, on both axes, one
+        # of them rotated 45deg), so give them more headroom than a typical
+        # bar/line chart needs.
+        fig.update_layout(margin=dict(l=120, r=30, t=50, b=120))
+        fig.update_xaxes(tickangle=-45, automargin=True)
+        fig.update_yaxes(automargin=True)
 
     return json.loads(fig.to_json())
 
