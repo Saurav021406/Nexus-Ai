@@ -55,7 +55,7 @@ def analyze_data_quality(df: pd.DataFrame) -> dict:
         if numeric_parsed.notna().mean() > 0.9:
             type_issues.append({"column": col, "detected_as": "numeric", "currently": "text"})
             continue
-        date_parsed = pd.to_datetime(sample, errors="coerce")
+        date_parsed = pd.to_datetime(sample, format="mixed", errors="coerce")
         if date_parsed.notna().mean() > 0.9:
             type_issues.append({"column": col, "detected_as": "date", "currently": "text"})
 
@@ -103,9 +103,9 @@ def clean_dataset(df: pd.DataFrame, options: dict) -> tuple[pd.DataFrame, dict]:
                 cleaned[col] = pd.to_numeric(cleaned[col], errors="coerce")
                 fixed_columns.append(col)
                 continue
-            date_parsed = pd.to_datetime(sample, errors="coerce")
+            date_parsed = pd.to_datetime(sample, format="mixed", errors="coerce")
             if date_parsed.notna().mean() > 0.9:
-                cleaned[col] = pd.to_datetime(cleaned[col], errors="coerce")
+                cleaned[col] = pd.to_datetime(cleaned[col], format="mixed", errors="coerce")
                 fixed_columns.append(col)
         report_steps.append({"step": "fix_types", "columns_fixed": fixed_columns})
 

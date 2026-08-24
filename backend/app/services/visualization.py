@@ -89,7 +89,7 @@ def generate_chart(
         working = df.copy()
         if x and x in df.columns:
             try:
-                parsed = pd.to_datetime(working[x], errors="coerce")
+                parsed = pd.to_datetime(working[x], format="mixed", errors="coerce")
                 if parsed.notna().sum() > 0:
                     working[x] = parsed
             except Exception:
@@ -114,7 +114,7 @@ def generate_chart(
         working = df.copy()
         if x and x in df.columns:
             try:
-                parsed = pd.to_datetime(working[x], errors="coerce")
+                parsed = pd.to_datetime(working[x], format="mixed", errors="coerce")
                 if parsed.notna().sum() > 0:
                     working[x] = parsed
             except Exception:

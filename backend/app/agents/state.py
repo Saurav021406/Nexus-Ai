@@ -47,6 +47,7 @@ class WorkflowState:
     errors: list[dict] = field(default_factory=list)
     status: str = "running"  # running | awaiting_approval | completed | failed
     replan_count: int = 0  # Section 21: how many times the Manager revised its plan after a review rejection
+    dataset_columns: list[str] = field(default_factory=list)  # Domain Gate needs this - the actual column names, not the privacy-filtered summary text
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 

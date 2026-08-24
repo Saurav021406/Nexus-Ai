@@ -37,7 +37,12 @@ def _find_date_column(df: pd.DataFrame) -> str | None:
     for col in df.columns:
         if df[col].dtype == "object":
             try:
-                parsed = pd.to_datetime(df[col], errors="coerce")
+                # format="mixed" tells pandas explicitly "yes, formats may
+                # vary row to row, parse flexibly" - same fallback behavior
+                # as before, but without the UserWarning spamming logs once
+                # per column tried (this runs across every object-dtype
+                # column, every time /forecast/columns is called).
+                parsed = pd.to_datetime(df[col], format="mixed", errors="coerce")
                 # Consider it a date column if most values parsed successfully
                 if parsed.notna().mean() > 0.9:
                     return col
@@ -87,7 +92,7 @@ async def run_forecast(payload: ForecastRequest, user=Depends(get_current_user))
     x_label = "time period"
     if date_col:
         dated = df[[date_col, payload.target_column]].dropna().reset_index(drop=True)
-        dated[date_col] = pd.to_datetime(dated[date_col], errors="coerce")
+        dated[date_col] = pd.to_datetime(dated[date_col], format="mixed", errors="coerce")
         dated = dated.dropna().sort_values(date_col).reset_index(drop=True)
         if len(dated) >= 5:
             working = dated
