@@ -14,3 +14,4 @@ openai
 python-docx==1.1.2
 reportlab==4.2.5
 openai-agents==0.21.0
+pypdf==6.16.2

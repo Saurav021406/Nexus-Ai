@@ -6,13 +6,16 @@ import pandas as pd
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 
 from app.deps import get_current_user
+from app.services.document_extraction import ExtractionError, extract_document_text
 from app.supabase_client import supabase_admin
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
 BUCKET_NAME = "datasets"
 MAX_FILE_SIZE_MB = 25
-ALLOWED_EXTENSIONS = (".csv", ".xlsx", ".xls")
+TABULAR_EXTENSIONS = (".csv", ".xlsx", ".xls")
+DOCUMENT_EXTENSIONS = (".pdf", ".docx")
+ALLOWED_EXTENSIONS = TABULAR_EXTENSIONS + DOCUMENT_EXTENSIONS
 
 
 def _dtype_to_simple(dtype) -> str:
@@ -65,7 +68,10 @@ async def upload_dataset(
     user=Depends(get_current_user),
 ):
     if not file.filename or not file.filename.lower().endswith(ALLOWED_EXTENSIONS):
-        raise HTTPException(status_code=400, detail="Only CSV or XLSX files are supported right now")
+        raise HTTPException(
+            status_code=400,
+            detail="Only CSV, XLSX, PDF, or DOCX files are supported right now",
+        )
 
     raw_bytes = await file.read()
     if len(raw_bytes) == 0:
@@ -77,26 +83,27 @@ async def upload_dataset(
             status_code=400, detail=f"File too large ({size_mb:.1f}MB). Max is {MAX_FILE_SIZE_MB}MB."
         )
 
-    is_excel = file.filename.lower().endswith((".xlsx", ".xls"))
-    try:
-        if is_excel:
-            df = pd.read_excel(io.BytesIO(raw_bytes))
-        else:
-            df = pd.read_csv(io.BytesIO(raw_bytes))
-    except Exception:
-        file_type = "Excel" if is_excel else "CSV"
-        raise HTTPException(status_code=400, detail=f"Could not parse {file_type} file. Please check the format.")
+    is_document = file.filename.lower().endswith(DOCUMENT_EXTENSIONS)
 
-    if df.empty:
-        raise HTTPException(status_code=400, detail="Uploaded file appears to be empty")
+    if is_document:
+        analysis = await _handle_document_upload(file.filename, raw_bytes)
+    else:
+        analysis = _handle_tabular_upload(file.filename, raw_bytes)
 
     dataset_id = str(uuid.uuid4())
     safe_filename = file.filename.replace("/", "_").replace("\\", "_")
     storage_path = f"{user.id}/{dataset_id}_{safe_filename}"
 
-    content_type = (
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if is_excel else "text/csv"
-    )
+    content_type_map = {
+        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".xls": "application/vnd.ms-excel",
+        ".csv": "text/csv",
+        ".pdf": "application/pdf",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
+    ext = "." + file.filename.lower().rsplit(".", 1)[-1]
+    content_type = content_type_map.get(ext, "application/octet-stream")
+
     try:
         supabase_admin.storage.from_(BUCKET_NAME).upload(
             storage_path,
@@ -106,8 +113,6 @@ async def upload_dataset(
     except Exception:
         raise HTTPException(status_code=500, detail="Could not store the uploaded file. Please try again.")
 
-    analysis = analyze_csv(df)
-
     try:
         supabase_admin.table("datasets").insert(
             {
@@ -115,8 +120,12 @@ async def upload_dataset(
                 "user_id": user.id,
                 "filename": file.filename,
                 "storage_path": storage_path,
-                "row_count": analysis["row_count"],
-                "column_count": analysis["column_count"],
+                # row_count/column_count stay meaningful for tabular data;
+                # documents get 0 here since the real detail lives in `analysis`
+                # (word_count, page_count, etc.) - kept for schema compatibility
+                # rather than adding new NOT NULL columns for one file kind.
+                "row_count": analysis.get("row_count", 0),
+                "column_count": analysis.get("column_count", 0),
                 "analysis": json.dumps(analysis),
             }
         ).execute()
@@ -129,6 +138,48 @@ async def upload_dataset(
         "dataset_id": dataset_id,
         "filename": file.filename,
         **analysis,
+    }
+
+
+def _handle_tabular_upload(filename: str, raw_bytes: bytes) -> dict:
+    is_excel = filename.lower().endswith((".xlsx", ".xls"))
+    try:
+        if is_excel:
+            df = pd.read_excel(io.BytesIO(raw_bytes))
+        else:
+            df = pd.read_csv(io.BytesIO(raw_bytes))
+    except Exception:
+        file_type = "Excel" if is_excel else "CSV"
+        raise HTTPException(status_code=400, detail=f"Could not parse {file_type} file. Please check the format.")
+
+    if df.empty:
+        raise HTTPException(status_code=400, detail="Uploaded file appears to be empty")
+
+    analysis = analyze_csv(df)
+    analysis["kind"] = "tabular"
+    return analysis
+
+
+async def _handle_document_upload(filename: str, raw_bytes: bytes) -> dict:
+    """Step 2 of the RAG design: extraction only, no chunking/embeddings
+    yet (that's Step 3 - services/document_extraction.py's own docstring
+    explains the scope split). The full extracted text is stored so a
+    later step can pick it up without re-parsing the file."""
+    try:
+        extraction = extract_document_text(raw_bytes, filename)
+    except ExtractionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    text = extraction["text"]
+    return {
+        "kind": "document",
+        "document_type": extraction["document_type"],
+        "page_count": extraction.get("page_count"),
+        "paragraph_count": extraction.get("paragraph_count"),
+        "word_count": extraction["word_count"],
+        "char_count": extraction["char_count"],
+        "text_preview": text[:1000] + ("..." if len(text) > 1000 else ""),
+        "extracted_text": text,
     }
 
 

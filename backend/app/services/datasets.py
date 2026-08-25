@@ -55,21 +55,68 @@ def get_dataset_record(dataset_id: str, user_id: str) -> dict:
 
 
 def get_dataset_dataframe(dataset_id: str, user_id: str) -> pd.DataFrame:
-    """Load the full CSV from storage, never the small frontend preview."""
+    """Load the full CSV/Excel from storage, never the small frontend preview."""
     dataset = get_dataset_record(dataset_id, user_id)
+
+    path_lower = dataset["storage_path"].lower()
+    if path_lower.endswith((".pdf", ".docx")):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This is a document dataset (PDF/Word), not a spreadsheet - tabular "
+                "analysis isn't applicable here. Document-based analysis (RAG) is "
+                "being built separately."
+            ),
+        )
 
     try:
         raw_bytes = supabase_admin.storage.from_(BUCKET_NAME).download(dataset["storage_path"])
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Could not fetch dataset file: {e}")
 
-    path_lower = dataset["storage_path"].lower()
     try:
         if path_lower.endswith(".xlsx") or path_lower.endswith(".xls"):
             return pd.read_excel(io.BytesIO(raw_bytes))
         return pd.read_csv(io.BytesIO(raw_bytes))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not parse stored file: {e}")
+
+
+def is_document_dataset(dataset_id: str, user_id: str) -> bool:
+    dataset = get_dataset_record(dataset_id, user_id)
+    return dataset["storage_path"].lower().endswith((".pdf", ".docx"))
+
+
+def get_document_text(dataset_id: str, user_id: str) -> str:
+    """Returns the full extracted text for a document dataset (Step 2's
+    output), read back from the `analysis` blob saved at upload time -
+    avoids re-downloading and re-parsing the original PDF/DOCX on every
+    call. Used by later RAG steps (chunking/embeddings/retrieval)."""
+    import json
+
+    result = (
+        supabase_admin.table("datasets")
+        .select("analysis, storage_path")
+        .eq("id", dataset_id)
+        .eq("user_id", user_id)
+        .single()
+        .execute()
+    )
+    dataset = result.data
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    if not dataset["storage_path"].lower().endswith((".pdf", ".docx")):
+        raise HTTPException(status_code=400, detail="This dataset is not a document.")
+
+    try:
+        analysis = json.loads(dataset["analysis"]) if dataset.get("analysis") else {}
+    except Exception:
+        analysis = {}
+
+    text = analysis.get("extracted_text")
+    if not text:
+        raise HTTPException(status_code=500, detail="No extracted text found for this document.")
+    return text
 
 
 def _normalise_column_name(column: object) -> str:
