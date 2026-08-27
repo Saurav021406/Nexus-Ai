@@ -21,10 +21,22 @@ interface ColumnInfo {
 interface AnalysisResult {
   dataset_id: string
   filename: string
-  row_count: number
-  column_count: number
-  columns: ColumnInfo[]
-  preview_rows: Record<string, string>[]
+  kind?: 'tabular' | 'document'
+  // Tabular fields - present when kind is 'tabular' (or omitted, for
+  // backward compatibility with responses from before documents existed)
+  row_count?: number
+  column_count?: number
+  columns?: ColumnInfo[]
+  preview_rows?: Record<string, string>[]
+  // Document fields - present when kind is 'document' (PDF/Word upload)
+  document_type?: 'pdf' | 'docx'
+  page_count?: number | null
+  paragraph_count?: number | null
+  word_count?: number
+  char_count?: number
+  text_preview?: string
+  extracted_text?: string
+  chunks_ingested?: number | null
 }
 
 interface DomainResult {
@@ -1246,13 +1258,13 @@ export default function UploadDataset({
   const tabs: { id: WorkspaceTab; label: string; disabled?: boolean }[] = [
     { id: 'upload', label: 'Upload CSV' },
     { id: 'profile', label: 'Data profile', disabled: !result },
-    { id: 'analysis', label: 'AI analysis', disabled: !result },
-    { id: 'agent', label: 'Multi-Agent', disabled: !result },
-    { id: 'chat', label: 'Ask your data', disabled: !result },
-    { id: 'forecast', label: 'Forecast', disabled: !result },
-    { id: 'clean', label: 'Clean Data', disabled: !result },
-    { id: 'eda', label: 'EDA & Charts', disabled: !result },
-    { id: 'visualize', label: 'Visualize', disabled: !result },
+    { id: 'analysis', label: 'AI analysis', disabled: !result || result?.kind === 'document' },
+    { id: 'agent', label: 'Multi-Agent', disabled: !result || result?.kind === 'document' },
+    { id: 'chat', label: 'Ask your data', disabled: !result || result?.kind === 'document' },
+    { id: 'forecast', label: 'Forecast', disabled: !result || result?.kind === 'document' },
+    { id: 'clean', label: 'Clean Data', disabled: !result || result?.kind === 'document' },
+    { id: 'eda', label: 'EDA & Charts', disabled: !result || result?.kind === 'document' },
+    { id: 'visualize', label: 'Visualize', disabled: !result || result?.kind === 'document' },
     { id: 'history', label: 'History' },
   ]
 
@@ -1311,11 +1323,42 @@ export default function UploadDataset({
       )}
 
       {/* ---------- Profile tab ---------- */}
-      {result && activeTab === 'profile' && (
+      {result && activeTab === 'profile' && result.kind === 'document' && (
         <div className="space-y-6 py-6">
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-            <Stat label="Rows" value={result.row_count} />
-            <Stat label="Columns" value={result.column_count} />
+            <Stat label="Type" value={(result.document_type || 'document').toUpperCase()} isText />
+            {result.page_count != null && <Stat label="Pages" value={result.page_count} />}
+            {result.paragraph_count != null && <Stat label="Paragraphs" value={result.paragraph_count} />}
+            <Stat label="Words" value={result.word_count ?? 0} />
+            <Stat
+              label="Chunks indexed"
+              value={result.chunks_ingested != null ? result.chunks_ingested : 'pending'}
+              isText={result.chunks_ingested == null}
+            />
+          </div>
+
+          <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
+              Extracted text preview
+            </p>
+            <p className="whitespace-pre-wrap text-sm text-slate-300">
+              {result.text_preview || 'No preview available.'}
+            </p>
+          </div>
+
+          <div className="rounded-lg border border-amber-800 bg-amber-950/20 px-3 py-2 text-sm text-amber-300">
+            This is a document dataset. AI analysis, Multi-Agent, Chat, Forecast, Clean Data, EDA, and
+            Visualize are built for spreadsheet data (CSV/Excel) and aren't available for documents yet -
+            that's coming with the RAG-based document Q&amp;A feature.
+          </div>
+        </div>
+      )}
+
+      {result && activeTab === 'profile' && result.kind !== 'document' && (
+        <div className="space-y-6 py-6">
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <Stat label="Rows" value={result.row_count ?? 0} />
+            <Stat label="Columns" value={result.column_count ?? 0} />
           </div>
 
           <div className="rounded-xl border border-slate-800 overflow-x-auto">
@@ -1330,7 +1373,7 @@ export default function UploadDataset({
                 </tr>
               </thead>
               <tbody>
-                {result.columns.map((col) => (
+                {(result.columns ?? []).map((col) => (
                   <tr key={col.name} className="border-t border-slate-800">
                     <td className="p-2 font-medium">{col.name}</td>
                     <td className="p-2 text-slate-400">{col.dtype}</td>
@@ -1351,7 +1394,7 @@ export default function UploadDataset({
               <table className="w-full text-xs">
                 <thead className="bg-slate-900 text-slate-400">
                   <tr>
-                    {result.columns.map((col) => (
+                    {(result.columns ?? []).map((col) => (
                       <th key={col.name} className="text-left p-2 whitespace-nowrap">
                         {col.name}
                       </th>
@@ -1359,9 +1402,9 @@ export default function UploadDataset({
                   </tr>
                 </thead>
                 <tbody>
-                  {result.preview_rows.map((row, i) => (
+                  {(result.preview_rows ?? []).map((row, i) => (
                     <tr key={i} className="border-t border-slate-800">
-                      {result.columns.map((col) => (
+                      {(result.columns ?? []).map((col) => (
                         <td key={col.name} className="p-2 whitespace-nowrap">
                           {row[col.name]}
                         </td>
@@ -1376,7 +1419,7 @@ export default function UploadDataset({
       )}
 
       {/* ---------- AI analysis tab ---------- */}
-      {result && activeTab === 'analysis' && (
+      {result && result.kind !== 'document' && activeTab === 'analysis' && (
         <div className="space-y-4 py-6">
           <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4">
             <h3 className="font-medium text-white">Collaborative AI analysis</h3>
@@ -2009,7 +2052,7 @@ export default function UploadDataset({
       )}
 
       {/* ---------- Multi-Agent tab (live orchestration) ---------- */}
-      {result && activeTab === 'agent' && (
+      {result && result.kind !== 'document' && activeTab === 'agent' && (
         <div className="space-y-4 py-6">
           <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
             <p className="text-sm font-semibold text-slate-100">Multi-Agent Analysis</p>
@@ -2094,7 +2137,7 @@ export default function UploadDataset({
       )}
 
       {/* ---------- Chat tab ---------- */}
-      {result && activeTab === 'chat' && (
+      {result && result.kind !== 'document' && activeTab === 'chat' && (
         <div className="space-y-4 py-6">
           <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4">
             <h3 className="font-medium text-white">Ask your data</h3>
@@ -2151,7 +2194,7 @@ export default function UploadDataset({
       )}
 
       {/* ---------- Forecast tab ---------- */}
-      {result && activeTab === 'forecast' && (
+      {result && result.kind !== 'document' && activeTab === 'forecast' && (
         <div className="space-y-4 py-6">
           <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4">
             <h3 className="font-medium text-white">Forecast a numeric column</h3>
@@ -2235,7 +2278,7 @@ export default function UploadDataset({
       )}
 
       {/* ---------- Clean Data tab ---------- */}
-      {result && activeTab === 'clean' && (
+      {result && result.kind !== 'document' && activeTab === 'clean' && (
         <div className="space-y-4 py-6">
           <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4">
             <h3 className="font-medium text-white">Data quality &amp; cleaning</h3>
@@ -2379,7 +2422,7 @@ export default function UploadDataset({
       )}
 
       {/* ---------- EDA & Charts tab ---------- */}
-      {result && activeTab === 'eda' && (
+      {result && result.kind !== 'document' && activeTab === 'eda' && (
         <div className="space-y-4 py-6">
           <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4">
             <h3 className="font-medium text-white">Correlation &amp; distributions</h3>
@@ -2497,7 +2540,7 @@ export default function UploadDataset({
       )}
 
       {/* ---------- Visualize tab ---------- */}
-      {result && activeTab === 'visualize' && (
+      {result && result.kind !== 'document' && activeTab === 'visualize' && (
         <div className="space-y-6 py-6">
           <div>
             <h3 className="text-lg font-medium text-white">Visualization Agent</h3>
@@ -2536,7 +2579,7 @@ export default function UploadDataset({
                     className="w-full rounded-lg bg-slate-800 border border-slate-700 px-3 py-2 text-sm text-slate-100"
                   >
                     <option value="">Select column</option>
-                    {result.columns.map((col) => (
+                    {(result.columns ?? []).map((col) => (
                       <option key={col.name} value={col.name}>
                         {col.name}
                       </option>
@@ -2553,7 +2596,7 @@ export default function UploadDataset({
                     className="w-full rounded-lg bg-slate-800 border border-slate-700 px-3 py-2 text-sm text-slate-100"
                   >
                     <option value="">Select column</option>
-                    {result.columns.map((col) => (
+                    {(result.columns ?? []).map((col) => (
                       <option key={col.name} value={col.name}>
                         {col.name}
                       </option>
