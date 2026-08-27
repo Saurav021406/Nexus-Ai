@@ -6,6 +6,7 @@ import pandas as pd
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 
 from app.deps import get_current_user
+from app.services.document_chunks import delete_document_chunks, ingest_document_chunks
 from app.services.document_extraction import ExtractionError, extract_document_text
 from app.supabase_client import supabase_admin
 
@@ -134,9 +135,23 @@ async def upload_dataset(
         # file is already safely in storage and we can still return analysis.
         print(f"Warning: could not save dataset metadata: {e}")
 
+    chunks_ingested = None
+    if is_document:
+        # Step 3 of the RAG design: chunk + embed + store, once, right now
+        # at upload time - never at query time. Non-blocking: a failure
+        # here (e.g. embedding model unavailable) shouldn't take down the
+        # whole upload when the document itself is already safely stored -
+        # the dataset just won't be searchable via RAG until re-ingested.
+        try:
+            chunks_ingested = ingest_document_chunks(dataset_id, user.id, analysis["extracted_text"])
+        except Exception as e:
+            print(f"Warning: could not ingest document chunks for {dataset_id}: {e}")
+            chunks_ingested = 0
+
     return {
         "dataset_id": dataset_id,
         "filename": file.filename,
+        "chunks_ingested": chunks_ingested,
         **analysis,
     }
 
@@ -267,5 +282,13 @@ async def delete_dataset(dataset_id: str, user=Depends(get_current_user)):
         supabase_admin.table("datasets").delete().eq("id", dataset_id).eq("user_id", user.id).execute()
     except Exception:
         raise HTTPException(status_code=500, detail="Could not delete dataset record")
+
+    # Best-effort - chunks (if any; only documents have them) shouldn't
+    # outlive the dataset they came from, but a cleanup failure here
+    # shouldn't block the delete the user actually asked for.
+    try:
+        delete_document_chunks(dataset_id, user.id)
+    except Exception as e:
+        print(f"Warning: could not delete document chunks for {dataset_id}: {e}")
 
     return {"deleted": True, "dataset_id": dataset_id}
