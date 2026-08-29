@@ -176,9 +176,16 @@ interface HistoryItem {
   created_at: string
 }
 
+interface ChatSource {
+  excerpt_number: number
+  chunk_index: number | null
+  preview: string
+}
+
 interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
+  sources?: ChatSource[] | null
 }
 
 interface ForecastColumnsInfo {
@@ -928,7 +935,10 @@ export default function UploadDataset({
       }
 
       const data = await response.json()
-      setMessages((prev) => [...prev, { role: 'assistant', content: data.answer }])
+      setMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: data.answer, sources: data.sources ?? null },
+      ])
       setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50)
     } catch (err) {
       setChatError((err as Error).message)
@@ -1260,7 +1270,7 @@ export default function UploadDataset({
     { id: 'profile', label: 'Data profile', disabled: !result },
     { id: 'analysis', label: 'AI analysis', disabled: !result || result?.kind === 'document' },
     { id: 'agent', label: 'Multi-Agent', disabled: !result || result?.kind === 'document' },
-    { id: 'chat', label: 'Ask your data', disabled: !result || result?.kind === 'document' },
+    { id: 'chat', label: 'Ask your data', disabled: !result },
     { id: 'forecast', label: 'Forecast', disabled: !result || result?.kind === 'document' },
     { id: 'clean', label: 'Clean Data', disabled: !result || result?.kind === 'document' },
     { id: 'eda', label: 'EDA & Charts', disabled: !result || result?.kind === 'document' },
@@ -1305,13 +1315,13 @@ export default function UploadDataset({
         <div className="space-y-4 py-6">
           <div>
             <h3 className="text-lg font-medium text-white">Upload a dataset</h3>
-            <p className="mt-1 text-sm text-slate-400">Choose a CSV or Excel (.xlsx) file to generate a data profile.</p>
+            <p className="mt-1 text-sm text-slate-400">Choose a CSV, Excel (.xlsx), PDF, or Word (.docx) file.</p>
           </div>
           <label className="block rounded-xl border border-dashed border-slate-700 bg-slate-950/30 p-6 transition hover:border-blue-500/70">
             <span className="sr-only">Choose CSV file</span>
             <input
               type="file"
-              accept=".csv,.xlsx,.xls"
+              accept=".csv,.xlsx,.xls,.pdf,.docx"
               onChange={handleFileChange}
               disabled={uploading}
               className="block w-full text-sm text-slate-300 file:mr-4 file:rounded-lg file:border-0 file:bg-blue-600 file:px-4 file:py-2 file:text-sm file:font-medium file:text-white hover:file:bg-blue-500 disabled:opacity-50"
@@ -2137,12 +2147,14 @@ export default function UploadDataset({
       )}
 
       {/* ---------- Chat tab ---------- */}
-      {result && result.kind !== 'document' && activeTab === 'chat' && (
+      {result && activeTab === 'chat' && (
         <div className="space-y-4 py-6">
           <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4">
             <h3 className="font-medium text-white">Ask your data</h3>
             <p className="mt-1 text-sm text-slate-400">
-              Ask questions in plain English. Answers use the exact, full-dataset statistics - never guesses from a sample.
+              {result.kind === 'document'
+                ? 'Ask questions in plain English. Answers are grounded only in retrieved excerpts from this document - never outside knowledge.'
+                : 'Ask questions in plain English. Answers use the exact, full-dataset statistics - never guesses from a sample.'}
             </p>
           </div>
 
@@ -2150,8 +2162,9 @@ export default function UploadDataset({
             <div className="flex-1 overflow-y-auto p-4 space-y-3">
               {messages.length === 0 && (
                 <p className="text-sm text-slate-500">
-                  Try asking something like "What's the average value in [a numeric column]?" or "Which category
-                  appears most often?"
+                  {result.kind === 'document'
+                    ? 'Try asking something like "What does this document say about [a topic]?"'
+                    : 'Try asking something like "What\'s the average value in [a numeric column]?" or "Which category appears most often?"'}
                 </p>
               )}
               {messages.map((msg, i) => (
@@ -2162,6 +2175,18 @@ export default function UploadDataset({
                   }`}
                 >
                   {msg.content}
+                  {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && (
+                    <div className="mt-2 space-y-1 border-t border-slate-700 pt-2">
+                      <p className="text-xs font-medium text-slate-400">Sources:</p>
+                      {msg.sources.map((s) => (
+                        <div key={s.excerpt_number} className="text-xs text-slate-500">
+                          <span className="font-medium text-slate-400">[Excerpt {s.excerpt_number}]</span>{' '}
+                          {s.preview}
+                          {s.preview.length >= 160 ? '…' : ''}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
               {asking && (
