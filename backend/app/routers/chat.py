@@ -13,18 +13,21 @@ converge on the same Multi-Agent + Consensus answer generation:
  TABULAR                          DOCUMENT
    |                                  |
  Domain Gate (agents/domain_gate)   Hybrid Retrieval (services/retrieval)
-   |  reject -> no LLM call           |
+   |  reject -> no LLM call           |  fetches CANDIDATE_CHUNKS (15)
    v                                  v
- pandas data_summary              Evidence Gate (services/evidence_gate)
+ pandas data_summary                Reranker (services/reranker)
+   |                                  |  rescores & keeps TOP_K_CHUNKS (5)
+   |                                  v
+   |                                Evidence Gate (services/evidence_gate)
    |                                  |  reject -> no LLM call
    |                                  v
    |                              retrieved chunks -> context
    |                                  |
    +----------------+-----------------+
-                     v
+                    v
          get_consensus() - same Hybrid Consensus Engine
          (Groq + NVIDIA + MiniMax) for both paths
-                     v
+                    v
               Final Answer (+ sources, for documents)
 
 Tabular answers reuse the exact, pandas-computed data summary the analysis
@@ -43,12 +46,14 @@ from app.deps import get_current_user
 from app.services.consensus import get_consensus
 from app.services.datasets import build_data_summary, get_dataset_dataframe, is_document_dataset
 from app.services.evidence_gate import check_evidence
+from app.services.reranker import rerank_chunks
 from app.services.retrieval import hybrid_search
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 MAX_HISTORY_MESSAGES = 6  # keep prompts small and cheap
-TOP_K_CHUNKS = 6
+CANDIDATE_CHUNKS = 15     # wider initial pool from hybrid search
+TOP_K_CHUNKS = 5          # final best reranked chunks fed to LLM context
 
 
 class ChatMessage(BaseModel):
@@ -111,7 +116,7 @@ USER QUESTION: {payload.question}
 Answer in 2-4 short sentences, plain text, no markdown formatting, no JSON."""
 
     try:
-        result = await run_in_threadpool(get_consensus, prompt, temperature=1, max_tokens=1024)
+        result = await run_in_threadpool(get_consensus, prompt, temperature=0.1, max_tokens=1024)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
 
@@ -119,15 +124,17 @@ Answer in 2-4 short sentences, plain text, no markdown formatting, no JSON."""
 
 
 async def _chat_over_document(payload: ChatRequest, user_id: str) -> dict:
-    # Hybrid Retrieval (Step 4): vector + keyword search, merged with RRF.
-    chunks = await run_in_threadpool(
-        hybrid_search, payload.dataset_id, user_id, payload.question, TOP_K_CHUNKS
+    # 1. Hybrid Retrieval (Step 4): vector + keyword search pool
+    candidates = await run_in_threadpool(
+        hybrid_search, payload.dataset_id, user_id, payload.question, CANDIDATE_CHUNKS
     )
 
-    # Evidence Gate (Step 5): free, instant, no LLM call. Rejects when the
-    # retrieved chunks don't actually support an answer, instead of letting
-    # an LLM "answer anyway" and hallucinate from a document that doesn't
-    # contain it.
+    # 2. Reranker (Step 7): neural cross-encoder / lexical rescore to Top 5
+    chunks = await run_in_threadpool(
+        rerank_chunks, payload.question, candidates, TOP_K_CHUNKS
+    )
+
+    # 3. Evidence Gate (Step 5): free, instant, no LLM call
     evidence = check_evidence(chunks)
     if not evidence["has_evidence"]:
         return {"answer": evidence["reason"], "consensus": None, "sources": [], "in_domain": True}
@@ -154,7 +161,7 @@ Answer in 2-4 short sentences, plain text, no markdown formatting, no JSON. Refe
 excerpt numbers like [Excerpt 1] when citing a specific claim."""
 
     try:
-        result = await run_in_threadpool(get_consensus, prompt, temperature=1, max_tokens=1024)
+        result = await run_in_threadpool(get_consensus, prompt, temperature=0.1, max_tokens=1024)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
 
@@ -163,6 +170,7 @@ excerpt numbers like [Excerpt 1] when citing a specific claim."""
             "excerpt_number": i + 1,
             "chunk_index": c.get("chunk_index"),
             "preview": c["chunk_text"][:160],
+            "score": c.get("rerank_score", c.get("score")),
         }
         for i, c in enumerate(chunks)
     ]

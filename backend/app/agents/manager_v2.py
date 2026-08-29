@@ -23,14 +23,15 @@ from typing import Any
 from agents import Agent, Runner
 from pydantic import BaseModel, Field
 
-from app.agents.executor import execute_plan
+from app.agents.domain_gate import check_domain_relevance
 from app.agents.events import EventEmitter, NOOP_EMIT
+from app.agents.executor import execute_plan
 from app.agents.input_security import input_security_check
 from app.agents.model_provider import get_nexus_model
 from app.agents.planner import validate_and_order_plan
+from app.agents.registry import available_agent_domains, get_agent, get_agent_definition, list_capabilities
 from app.agents.reviewer import review_check
 from app.agents.security import security_check
-from app.agents.registry import get_agent, get_agent_definition, available_agent_domains, list_capabilities
 from app.agents.state import WorkflowState
 from app.agents.tracing import add_trace
 
@@ -115,9 +116,33 @@ async def run_manager_v2(state: WorkflowState, emit: EventEmitter = NOOP_EMIT) -
     add_trace(state, "Manager", "start", input_data={"user_query": state.user_query})
     await emit("manager_start", "Manager", "Understanding your request...", None)
 
-    # ---------- 0. Input Security (Section 23) - runs BEFORE the Manager
-    # plans or delegates anything. If this blocks, nothing below it - not
-    # the Manager LLM, not any specialist - ever runs for this request. ----------
+    # ---------- 0. Domain Gate (Step 1) - Free, zero LLM cost.
+    # Must run BEFORE Input Security to prevent wasting LLM tokens on off-topic queries. ----------
+    gate = check_domain_relevance(
+        state.user_query,
+        state.dataset_columns,
+        state.data_summary,
+    )
+    if not gate.get("in_domain", True):
+        state.status = "out_of_domain"
+        state.final_output = {
+            "workflow_id": state.workflow_id,
+            "user_query": state.user_query,
+            "goal": "",
+            "error": gate.get("reason", "Question is outside dataset domain."),
+            "summary": gate.get("reason", "Question is outside dataset domain."),
+            "key_metrics": [],
+            "recommendation": "",
+            "participating_agents": [],
+            "specialist_reports": [],
+        }
+        state.touch()
+        add_trace(state, "DomainGate", "rejected", output_data=gate)
+        await emit("domain_gate_rejected", "DomainGate", gate.get("reason", "Out of domain"), gate)
+        await emit("finished", "Manager", "Out of domain", {"status": state.status})
+        return state
+
+    # ---------- 1. Input Security (Section 23) ----------
     await emit("input_security_start", "InputSecurity", "Screening your request...", None)
     try:
         input_check = await asyncio.to_thread(input_security_check, state.user_query, state)
@@ -151,7 +176,7 @@ async def run_manager_v2(state: WorkflowState, emit: EventEmitter = NOOP_EMIT) -
 
     await emit("input_security_passed", "InputSecurity", "Request cleared for processing", input_check)
 
-    # ---------- 1-4. Planning -> Execution -> Review, with replanning
+    # ---------- 2-4. Planning -> Execution -> Review, with replanning
     # (Section 21: "If rejected: Reviewer -> Failure reason -> Manager ->
     # Replan -> Retry"). Bounded at MAX_REPLAN_ATTEMPTS extra tries so a
     # persistently-rejected plan can never loop forever (Section 25). ----------
@@ -169,7 +194,7 @@ async def run_manager_v2(state: WorkflowState, emit: EventEmitter = NOOP_EMIT) -
                 replan_feedback,
             )
 
-        # ---------- 1. Planning ----------
+        # ---------- 2. Planning ----------
         manager_agent = _build_manager_agent()
         try:
             planning_input = _build_planning_input(state, replan_feedback if is_replan else None)
@@ -179,8 +204,6 @@ async def run_manager_v2(state: WorkflowState, emit: EventEmitter = NOOP_EMIT) -
             state.add_error("Manager", f"Planning failed: {e}")
             add_trace(state, "Manager", "planning_failed", error=str(e))
             await emit("manager_planning_failed", "Manager", "Planning failed, using fallback plan", {"error": str(e)})
-            # Safe fallback: fall back to the primary detected domain as a single task,
-            # so a planning-model hiccup doesn't take down the whole request.
             fallback_domain = state.classification.get("primary_domain", "General")
             agent_plan = AgentPlan(
                 goal=state.user_query or "Analyze the dataset",
@@ -199,7 +222,7 @@ async def run_manager_v2(state: WorkflowState, emit: EventEmitter = NOOP_EMIT) -
         await emit("plan_created", "Manager", f"Plan: {state.goal}",
                     {"tasks": [t.model_dump() for t in agent_plan.tasks]})
 
-        # ---------- 2. Task Planning (validate + order into dependency waves) ----------
+        # ---------- 3. Task Planning (validate + order into dependency waves) ----------
         plan_result = validate_and_order_plan(agent_plan.tasks, available_agent_domains())
 
         if not plan_result.valid:
@@ -207,8 +230,6 @@ async def run_manager_v2(state: WorkflowState, emit: EventEmitter = NOOP_EMIT) -
             add_trace(state, "Planner", "validation_failed", error="; ".join(plan_result.errors))
             await emit("planner_validation_failed", "Planner", "Plan invalid, using fallback",
                         {"errors": plan_result.errors})
-            # Same safety net as a planning failure: fall back to one task on
-            # the detected primary domain rather than failing the whole request.
             fallback_domain = state.classification.get("primary_domain", "General")
             plan_result = validate_and_order_plan(
                 [PlannedTask(id="t1", agent=fallback_domain, task="full_analysis", depends_on=[])],
@@ -224,22 +245,15 @@ async def run_manager_v2(state: WorkflowState, emit: EventEmitter = NOOP_EMIT) -
         await emit("plan_ordered", "Planner", f"Ordered into {len(plan_result.waves)} execution wave(s)",
                     {"waves": [[t["id"] for t in wave] for wave in plan_result.waves]})
 
-        # ---------- 3. Task Execution (dependency-respecting, wave by wave) ----------
+        # ---------- 4. Task Execution (dependency-respecting, wave by wave) ----------
         async def run_specialist_task(task: dict, state: WorkflowState) -> dict:
             agent_fn = get_agent(task["agent"])
             if not agent_fn:
                 return {"error": f"{task['agent']} specialist is not installed"}
-            # BUGFIX: specialists used to only ever see state.data_summary, never
-            # the user's actual question or the Manager's planned task for them -
-            # so every run produced the same generic dataset overview regardless
-            # of what was asked. Passing task["task"] (falls back to the raw user
-            # query if a specialist doesn't support it) closes that gap.
             task_description = task.get("task") or state.user_query or ""
 
             definition = get_agent_definition(task["agent"])
             if definition and definition.needs_full_access:
-                # SQL Agent (and any future agent needing real dataset access,
-                # not just the text summary) gets the whole state instead.
                 output = await asyncio.to_thread(agent_fn, state, task_description)
             else:
                 output = await asyncio.to_thread(agent_fn, state.data_summary, task_description)
@@ -248,15 +262,10 @@ async def run_manager_v2(state: WorkflowState, emit: EventEmitter = NOOP_EMIT) -
                 return {"error": "Specialist returned invalid format"}
             return output
 
-        # A replanned attempt starts from a clean slate - a stale result from
-        # a REJECTED attempt must never linger into the final synthesis just
-        # because the new plan happened not to re-select that same agent.
         state.specialist_results = {}
         await execute_plan(state, plan_result.waves, run_specialist_task, emit)
 
-        # ---------- 4. Reviewer + Security (independent agents, run in
-        # PARALLEL - neither depends on the other's output, so there's no
-        # reason to pay for two sequential consensus round-trips here) ----------
+        # ---------- 5. Reviewer + Security (independent agents in PARALLEL) ----------
         await emit("reviewer_check_start", "Reviewer", "Reviewing specialist reports for accuracy and consistency...", None)
         await emit("security_check_start", "Security", "Running security and PII checks...", None)
 
@@ -296,7 +305,7 @@ async def run_manager_v2(state: WorkflowState, emit: EventEmitter = NOOP_EMIT) -
 
         # ---------- Replan decision ----------
         if state.review.get("approved", True):
-            break  # good result (or safe-default review) - stop looping
+            break
 
         if attempt < MAX_REPLAN_ATTEMPTS:
             replan_feedback = {
@@ -312,12 +321,8 @@ async def run_manager_v2(state: WorkflowState, emit: EventEmitter = NOOP_EMIT) -
                 "Still not approved after replanning - proceeding with the best available result", None,
             )
 
-    # ---------- 5. Final synthesis ----------
+    # ---------- 6. Final synthesis ----------
     state.final_output = _synthesize(state)
-    # Status reflects the FINAL attempt's outcome, not the cumulative error
-    # log across every replan - a replan that fixed the problem should be
-    # able to report "completed", even though state.errors (the full audit
-    # trail) still shows the earlier rejected attempt's errors.
     final_attempt_had_errors = any("error" in v for v in state.specialist_results.values())
     state.status = "completed_with_errors" if final_attempt_had_errors else "completed"
     state.touch()
