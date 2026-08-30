@@ -6,6 +6,10 @@ converge on the same Multi-Agent + Consensus answer generation:
 
     User Query
         |
+   Step 0: Cache lookup (services/cache) - sha256(dataset_id + question),
+   |       TTL 3600s. Hit -> instant response, no LLM call, no retrieval.
+   |  miss
+   v
    is_document_dataset()?
         |
    +----+-----------------------------+
@@ -25,8 +29,11 @@ converge on the same Multi-Agent + Consensus answer generation:
    |                                  |
    +----------------+-----------------+
                     v
-         get_consensus() - same Hybrid Consensus Engine
-         (Groq + NVIDIA + MiniMax) for both paths
+         get_consensus(tier="fast") - Fast single-model execution (Groq)
+         with automatic fallback to NVIDIA and MiniMax
+                    v
+         Cache the answer (only if in_domain and has_evidence/no
+         evidence-gate rejection - see _should_cache below), then return
                     v
               Final Answer (+ sources, for documents)
 
@@ -43,6 +50,7 @@ from pydantic import BaseModel, Field
 
 from app.agents.domain_gate import check_domain_relevance
 from app.deps import get_current_user
+from app.services.cache import get_cached_response, set_cached_response
 from app.services.consensus import get_consensus
 from app.services.datasets import build_data_summary, get_dataset_dataframe, is_document_dataset
 from app.services.evidence_gate import check_evidence
@@ -74,16 +82,49 @@ def _history_text(history: list[ChatMessage]) -> str:
     )
 
 
+def _should_cache(result: dict) -> bool:
+    """Only cache a genuinely useful, complete answer:
+    - not an out-of-domain rejection (Domain Gate) - the dataset's schema
+      or content could change what counts as in-domain later
+    - not a document "no evidence found" answer - new chunks could be
+      ingested for the same dataset at any time, and a cached "not found"
+      would then be wrong until the TTL expires
+    A history-carrying request also isn't cached: the same question can
+    mean something different depending on prior conversation turns, so a
+    cache keyed only on (dataset_id, question) would return a stale/wrong
+    answer for a follow-up like "what about the other one?".
+    """
+    if not result.get("in_domain"):
+        return False
+    if result.get("sources") == []:  # document path, evidence gate rejected
+        return False
+    return True
+
+
 @router.post("")
 async def chat_with_dataset(payload: ChatRequest, user=Depends(get_current_user)):
     """The Router: picks the Tabular Engine or the RAG Engine based on
     what kind of dataset this actually is, then hands off to whichever
     engine applies. Both engines end at the same get_consensus() call."""
+    # Step 0: cache lookup. Skipped entirely for follow-up questions (any
+    # history present) - see _should_cache for why those aren't cached
+    # either, so checking here too avoids a lookup that could never hit.
+    if not payload.history:
+        cached = await run_in_threadpool(get_cached_response, payload.dataset_id, payload.question)
+        if cached is not None:
+            return {**cached, "cached": True}
+
     document = await run_in_threadpool(is_document_dataset, payload.dataset_id, user.id)
 
     if document:
-        return await _chat_over_document(payload, user.id)
-    return await _chat_over_tabular(payload, user.id)
+        result = await _chat_over_document(payload, user.id)
+    else:
+        result = await _chat_over_tabular(payload, user.id)
+
+    if not payload.history and _should_cache(result):
+        await run_in_threadpool(set_cached_response, payload.dataset_id, payload.question, result)
+
+    return {**result, "cached": False}
 
 
 async def _chat_over_tabular(payload: ChatRequest, user_id: str) -> dict:
@@ -116,7 +157,9 @@ USER QUESTION: {payload.question}
 Answer in 2-4 short sentences, plain text, no markdown formatting, no JSON."""
 
     try:
-        result = await run_in_threadpool(get_consensus, prompt, temperature=0.1, max_tokens=1024)
+        result = await run_in_threadpool(
+            get_consensus, prompt, temperature=0.1, max_tokens=1024, tier="fast"
+        )
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
 
@@ -161,7 +204,9 @@ Answer in 2-4 short sentences, plain text, no markdown formatting, no JSON. Refe
 excerpt numbers like [Excerpt 1] when citing a specific claim."""
 
     try:
-        result = await run_in_threadpool(get_consensus, prompt, temperature=0.1, max_tokens=1024)
+        result = await run_in_threadpool(
+            get_consensus, prompt, temperature=0.1, max_tokens=1024, tier="fast"
+        )
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
 
@@ -170,6 +215,7 @@ excerpt numbers like [Excerpt 1] when citing a specific claim."""
             "excerpt_number": i + 1,
             "chunk_index": c.get("chunk_index"),
             "preview": c["chunk_text"][:160],
+            "text": c["chunk_text"],
             "score": c.get("rerank_score", c.get("score")),
         }
         for i, c in enumerate(chunks)

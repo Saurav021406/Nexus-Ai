@@ -94,6 +94,20 @@ def check_domain_relevance(
     if overlap:
         return {"in_domain": True, "reason": f"Query overlaps dataset vocabulary: {sorted(overlap)}"}
 
+    # A single leftover content word (everything else was a stopword) is
+    # too little signal to confidently reject on - e.g. "tell me about
+    # healthcare here" strips down to just {"healthcare"}, which won't
+    # literally appear in most datasets' column names or summaries even
+    # when the question is clearly on-topic for a healthcare dataset. With
+    # this little to go on, the "false negative is worse than false
+    # positive" philosophy above means defaulting to allow, same as the
+    # empty-query case.
+    if len(query_words) <= 1:
+        return {
+            "in_domain": True,
+            "reason": "Query too generic (single word after removing filler words) to confidently classify - defaulting to allow.",
+        }
+
     return {
         "in_domain": False,
         "reason": (

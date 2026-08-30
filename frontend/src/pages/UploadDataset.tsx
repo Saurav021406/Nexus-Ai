@@ -150,6 +150,7 @@ interface AgentStreamDone {
     key_metrics?: string[]
     participating_agents?: string[]
     goal?: string
+    specialist_reports?: SpecialistReport[]
   }
 }
 
@@ -180,6 +181,8 @@ interface ChatSource {
   excerpt_number: number
   chunk_index: number | null
   preview: string
+  text?: string
+  score?: number | null
 }
 
 interface ChatMessage {
@@ -487,6 +490,7 @@ export default function UploadDataset({
   const [question, setQuestion] = useState('')
   const [asking, setAsking] = useState(false)
   const [chatError, setChatError] = useState<string | null>(null)
+  const [activeSource, setActiveSource] = useState<ChatSource | null>(null)
   const chatEndRef = useRef<HTMLDivElement | null>(null)
 
   const [forecastColumns, setForecastColumns] = useState<ForecastColumnsInfo | null>(null)
@@ -2136,6 +2140,57 @@ export default function UploadDataset({
                   ))}
                 </ul>
               )}
+              {agentStreamResult.result?.specialist_reports && agentStreamResult.result.specialist_reports.length > 0 && (
+                <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+                  <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400">
+                    Specialist breakdown
+                  </p>
+                  <div className="mb-3 flex flex-wrap gap-2 border-b border-slate-800 pb-3">
+                    {agentStreamResult.result.specialist_reports.map((report) => {
+                      const domain = report.domain
+                      const defaultDomain = agentStreamResult.result.specialist_reports![0].domain
+                      const isActive = (activeSpecialistTab ?? defaultDomain) === domain
+                      return (
+                        <button
+                          key={domain}
+                          type="button"
+                          onClick={() => setActiveSpecialistTab(domain)}
+                          className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                            isActive
+                              ? 'bg-cyan-600 text-white'
+                              : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                          }`}
+                        >
+                          {domain}
+                        </button>
+                      )
+                    })}
+                  </div>
+                  {(() => {
+                    const reports = agentStreamResult.result.specialist_reports!
+                    const defaultDomain = reports[0].domain
+                    const active = reports.find((r) => r.domain === (activeSpecialistTab ?? defaultDomain)) ?? reports[0]
+                    if (!active) return null
+                    return active.error ? (
+                      <p className="text-sm text-amber-300">{active.error}</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {active.summary && <p className="text-sm text-slate-200">{active.summary}</p>}
+                        {active.key_metrics && active.key_metrics.length > 0 && (
+                          <ul className="list-inside list-disc text-sm text-slate-300">
+                            {active.key_metrics.map((m, i) => (
+                              <li key={i}>{m}</li>
+                            ))}
+                          </ul>
+                        )}
+                        {active.recommendation && (
+                          <p className="text-sm text-indigo-300">{active.recommendation}</p>
+                        )}
+                      </div>
+                    )
+                  })()}
+                </div>
+              )}
               <p className="mt-3 text-xs text-slate-500">
                 Status: {agentStreamResult.status}
                 {agentStreamResult.result?.participating_agents && agentStreamResult.result.participating_agents.length > 0 &&
@@ -2176,14 +2231,18 @@ export default function UploadDataset({
                 >
                   {msg.content}
                   {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && (
-                    <div className="mt-2 space-y-1 border-t border-slate-700 pt-2">
-                      <p className="text-xs font-medium text-slate-400">Sources:</p>
+                    <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-slate-700 pt-2">
+                      <span className="text-xs font-medium text-slate-400">Sources:</span>
                       {msg.sources.map((s) => (
-                        <div key={s.excerpt_number} className="text-xs text-slate-500">
-                          <span className="font-medium text-slate-400">[Excerpt {s.excerpt_number}]</span>{' '}
-                          {s.preview}
-                          {s.preview.length >= 160 ? '…' : ''}
-                        </div>
+                        <button
+                          key={s.excerpt_number}
+                          type="button"
+                          onClick={() => setActiveSource(s)}
+                          title={s.preview}
+                          className="rounded-full border border-cyan-700/60 bg-cyan-900/30 px-2 py-0.5 text-xs font-medium text-cyan-300 transition hover:border-cyan-500 hover:bg-cyan-800/40 hover:text-cyan-200"
+                        >
+                          [Excerpt {s.excerpt_number}]
+                        </button>
                       ))}
                     </div>
                   )}
@@ -2807,6 +2866,7 @@ export default function UploadDataset({
           )}
         </div>
       )}
+      <SourceDrawer source={activeSource} onClose={() => setActiveSource(null)} />
     </section>
   )
 }
@@ -2882,6 +2942,46 @@ function Stat({ label, value, isText }: { label: string; value: number | string;
     <div className="rounded-xl border border-slate-800 bg-slate-900 p-4">
       <p className="text-xs text-slate-400">{label}</p>
       <p className={`font-semibold ${isText ? 'text-lg capitalize' : 'text-2xl'}`}>{value}</p>
+    </div>
+  )
+}
+
+function SourceDrawer({ source, onClose }: { source: ChatSource | null; onClose: () => void }) {
+  useEffect(() => {
+    if (!source) return
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [source, onClose])
+
+  if (!source) return null
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end">
+      <div className="absolute inset-0 bg-black/60" onClick={onClose} aria-hidden="true" />
+      <div className="relative flex h-full w-full max-w-md flex-col border-l border-slate-800 bg-slate-950 shadow-2xl">
+        <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
+          <h4 className="text-sm font-semibold text-white">Excerpt {source.excerpt_number}</h4>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="rounded-lg px-2 py-1 text-slate-400 hover:bg-slate-800 hover:text-white"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-4 py-4">
+          {typeof source.score === 'number' && (
+            <p className="mb-3 text-xs text-slate-500">Relevance score: {source.score.toFixed(3)}</p>
+          )}
+          <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-200">
+            {source.text || source.preview}
+          </p>
+        </div>
+      </div>
     </div>
   )
 }
