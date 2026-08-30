@@ -347,6 +347,18 @@ def _synthesize(state: WorkflowState) -> dict[str, Any]:
         "traces": state.traces,
         "errors": state.errors,
         "replan_count": state.replan_count,
+        # Every specialist's prompt is deliberately capped to a compressed
+        # "one paragraph + ~3 key_metrics + one recommendation" shape (see
+        # e.g. data_scientist.py's prompt template) - that's a genuine,
+        # already-exact pandas computation the specialist saw in full, but
+        # its own answer only ever cherry-picks a few numbers from it into
+        # key_metrics. Including the full data_summary here lets the
+        # frontend show the ground-truth complete statistics alongside the
+        # narrative, so "the answer feels like just a summary" has an
+        # actual full-detail escape hatch without needing a bigger/looser
+        # LLM prompt (which would just be a different flavor of the same
+        # compression problem).
+        "data_summary": state.data_summary,
     }
 
     if not successful:

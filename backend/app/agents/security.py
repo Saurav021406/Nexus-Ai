@@ -40,7 +40,7 @@ Respond ONLY with this exact JSON shape (no markdown, no extra text):
   "safe_to_show": true
 }}
 """
-    result = get_consensus_json(prompt, temperature=1, max_tokens=1024)
+    result = get_consensus_json(prompt, temperature=1, max_tokens=1024, tier="fast")
 
     # Deterministic backstop: run the pii_scan tool over every specialist
     # report's text, regardless of what the LLM concluded on its own.

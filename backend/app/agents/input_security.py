@@ -54,7 +54,7 @@ Respond ONLY with this exact JSON shape (no markdown, no extra text):
   "blocked": false
 }}
 """
-    result = get_consensus_json(prompt, temperature=1, max_tokens=512)
+    result = get_consensus_json(prompt, temperature=1, max_tokens=512, tier="fast")
 
     # Deterministic backstop: run the prompt_injection_scan tool over the
     # raw query, regardless of what the LLM concluded on its own.

@@ -151,6 +151,7 @@ interface AgentStreamDone {
     participating_agents?: string[]
     goal?: string
     specialist_reports?: SpecialistReport[]
+    data_summary?: string
   }
 }
 
@@ -479,6 +480,7 @@ export default function UploadDataset({
   const [agentStreamEvents, setAgentStreamEvents] = useState<AgentStreamEvent[]>([])
   const [agentStreamResult, setAgentStreamResult] = useState<AgentStreamDone | null>(null)
   const [agentStreamError, setAgentStreamError] = useState<string | null>(null)
+  const [showFullDataSummary, setShowFullDataSummary] = useState(false)
   const [reportVersions, setReportVersions] = useState<ReportVersion[]>([])
   const [showVersionHistory, setShowVersionHistory] = useState(false)
   const [versionsLoading, setVersionsLoading] = useState(false)
@@ -696,6 +698,7 @@ export default function UploadDataset({
     setAgentStreamRunning(true)
     setAgentStreamEvents([])
     setAgentStreamResult(null)
+    setShowFullDataSummary(false)
     setAgentStreamError(null)
 
     try {
@@ -1273,7 +1276,7 @@ export default function UploadDataset({
     { id: 'upload', label: 'Upload CSV' },
     { id: 'profile', label: 'Data profile', disabled: !result },
     { id: 'analysis', label: 'AI analysis', disabled: !result || result?.kind === 'document' },
-    { id: 'agent', label: 'Multi-Agent', disabled: !result || result?.kind === 'document' },
+    { id: 'agent', label: 'Multi-Agent', disabled: !result },
     { id: 'chat', label: 'Ask your data', disabled: !result },
     { id: 'forecast', label: 'Forecast', disabled: !result || result?.kind === 'document' },
     { id: 'clean', label: 'Clean Data', disabled: !result || result?.kind === 'document' },
@@ -2066,7 +2069,7 @@ export default function UploadDataset({
       )}
 
       {/* ---------- Multi-Agent tab (live orchestration) ---------- */}
-      {result && result.kind !== 'document' && activeTab === 'agent' && (
+      {result && activeTab === 'agent' && (
         <div className="space-y-4 py-6">
           <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
             <p className="text-sm font-semibold text-slate-100">Multi-Agent Analysis</p>
@@ -2189,6 +2192,23 @@ export default function UploadDataset({
                       </div>
                     )
                   })()}
+                </div>
+              )}
+              {agentStreamResult.result?.data_summary && (
+                <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/40">
+                  <button
+                    type="button"
+                    onClick={() => setShowFullDataSummary((v) => !v)}
+                    className="flex w-full items-center justify-between px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-400 hover:text-slate-200"
+                  >
+                    <span>Full dataset statistics (exact, computed - not the AI's summary)</span>
+                    <span>{showFullDataSummary ? '−' : '+'}</span>
+                  </button>
+                  {showFullDataSummary && (
+                    <pre className="max-h-80 overflow-y-auto whitespace-pre-wrap border-t border-slate-800 px-4 py-3 text-xs leading-relaxed text-slate-300">
+                      {agentStreamResult.result.data_summary}
+                    </pre>
+                  )}
                 </div>
               )}
               <p className="mt-3 text-xs text-slate-500">

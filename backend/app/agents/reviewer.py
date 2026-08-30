@@ -39,4 +39,4 @@ Respond ONLY with this exact JSON shape (no markdown, no extra text):
   "suggested_improvements": []
 }}
 """
-    return get_consensus_json(prompt, temperature=1, max_tokens=1024)
+    return get_consensus_json(prompt, temperature=1, max_tokens=1024, tier="fast")
