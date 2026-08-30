@@ -75,15 +75,24 @@ CONTRADICTION_THRESHOLD = 0.35
 
 
 def _groq_client() -> OpenAI:
-    return OpenAI(base_url="https://api.groq.com/openai/v1", api_key=settings.groq_api_key, timeout=20)
+    # max_retries=0: we already have our own retry+fallback design
+    # (_call_with_retry's short 1-2.5s backoff, plus the tier="fast"
+    # cascade moving to the next provider on ANY failure). The OpenAI SDK's
+    # own default retry behavior additionally honors the provider's
+    # Retry-After header, which can be 10-40+ seconds on a 429 - that
+    # sleep happens silently INSIDE this call, before our own fallback
+    # logic ever gets a chance to react, turning a "fast" cascade into a
+    # multi-minute stall. Disabling it lets our own faster retry/fallback
+    # strategy actually run instead of being blocked by the SDK's.
+    return OpenAI(base_url="https://api.groq.com/openai/v1", api_key=settings.groq_api_key, timeout=20, max_retries=0)
 
 
 def _nvidia_client() -> OpenAI:
-    return OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=settings.nvidia_api_key, timeout=20)
+    return OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=settings.nvidia_api_key, timeout=20, max_retries=0)
 
 
 def _minimax_client() -> OpenAI:
-    return OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=settings.nvidia_api_key, timeout=20)
+    return OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=settings.nvidia_api_key, timeout=20, max_retries=0)
 
 
 def _call_groq(prompt: str, temperature: float, max_tokens: int) -> str:
@@ -108,6 +117,16 @@ def _call_nvidia(prompt: str, temperature: float, max_tokens: int) -> str:
 
 
 def _call_minimax(prompt: str, temperature: float, max_tokens: int) -> str:
+    # NVIDIA and MiniMax share ONE account/API key (see _minimax_client
+    # above) and _query_all_models fires both at the exact same instant
+    # via the thread pool - guaranteeing a 2x burst against that single
+    # account's rate limit on every full-tier consensus call, before any
+    # retry logic even gets a chance to react. This small proactive delay
+    # staggers minimax's actual network call away from nvidia's, cutting
+    # down how often they collide in the first place - a cheaper fix than
+    # only reacting to the 429 after it's already happened (which
+    # _call_with_retry still also does, as a second line of defense).
+    time.sleep(0.3)
     completion = _minimax_client().chat.completions.create(
         model=MINIMAX_MODEL_NAME,
         messages=[{"role": "user", "content": prompt}],

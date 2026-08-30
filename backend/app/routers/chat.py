@@ -178,7 +178,7 @@ async def _chat_over_document(payload: ChatRequest, user_id: str) -> dict:
     )
 
     # 3. Evidence Gate (Step 5): free, instant, no LLM call
-    evidence = check_evidence(chunks)
+    evidence = check_evidence(chunks, query=payload.question)
     if not evidence["has_evidence"]:
         return {"answer": evidence["reason"], "consensus": None, "sources": [], "in_domain": True}
 

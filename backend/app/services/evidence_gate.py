@@ -31,20 +31,50 @@ match is itself real evidence, even without a comparable similarity number.
 
 from __future__ import annotations
 
+import re
+
 DEFAULT_MIN_SIMILARITY = 0.35  # cosine similarity, 0-1 range (all-MiniLM-L6-v2)
 DEFAULT_MIN_CHUNKS = 1
+
+# A generic/summarization-style question ("what does this document say",
+# "give me an overview", "summarize this") has no single sharp semantic
+# target to embed against - it legitimately scores low similarity even
+# against genuinely the best chunks available, since "summarize
+# everything" isn't semantically close to any one specific passage the
+# way a factual question is. Applying the similarity threshold to these
+# would wrongly reject a question the document CAN answer, just not via a
+# precise semantic match. If retrieval found any chunks at all for a
+# query like this, that's enough evidence to let the LLM attempt an
+# answer - the similarity-threshold check below is skipped, not the
+# has-any-chunks check.
+_GENERIC_SUMMARY_WORDS = {
+    "summarize", "summary", "summarise", "overview", "explain", "describe",
+    "gist", "content", "contents", "about", "topic", "topics", "cover",
+    "covers", "say", "says", "said", "talk", "talks", "discuss",
+    "discusses", "main", "point", "points", "highlights",
+}
+
+
+def _is_generic_summary_query(query: str) -> bool:
+    words = set(re.findall(r"[a-zA-Z]+", (query or "").lower()))
+    return bool(words & _GENERIC_SUMMARY_WORDS)
 
 
 def check_evidence(
     chunks: list[dict],
     min_similarity: float = DEFAULT_MIN_SIMILARITY,
     min_chunks: int = DEFAULT_MIN_CHUNKS,
+    query: str = "",
 ) -> dict:
     """Returns {"has_evidence": bool, "reason": str, "best_similarity": float | None}.
 
     `reason` is written to be shown directly to the user when has_evidence
     is False - Section 4's exact expected message shape ("mujhe iska jawab
-    document mein nahi mila")."""
+    document mein nahi mila").
+
+    `query` is optional and only used to detect generic/summarization-style
+    questions (see _is_generic_summary_query) - passing "" preserves the
+    original score-only behavior exactly."""
     if not chunks:
         return {
             "has_evidence": False,
@@ -65,7 +95,11 @@ def check_evidence(
     # A missing similarity score (chunk found only via keyword search) is
     # not itself a failure - an exact word match is real evidence on its
     # own. Only an ACTUAL low similarity score is grounds for rejection.
-    if best_similarity is not None and best_similarity < min_similarity:
+    if (
+        best_similarity is not None
+        and best_similarity < min_similarity
+        and not _is_generic_summary_query(query)
+    ):
         return {
             "has_evidence": False,
             "reason": (

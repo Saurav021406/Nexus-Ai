@@ -88,7 +88,7 @@ def _document_state(payload: AgentRunRequest, user_id: str, query: str) -> Workf
     candidates = hybrid_search(payload.dataset_id, user_id, query, CANDIDATE_CHUNKS)
     chunks = rerank_chunks(query, candidates, TOP_K_CHUNKS)
 
-    evidence = check_evidence(chunks)
+    evidence = check_evidence(chunks, query=query)
     if not evidence["has_evidence"]:
         raise RoutingRejected(evidence["reason"])
 
