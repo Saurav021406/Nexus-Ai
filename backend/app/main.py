@@ -14,6 +14,7 @@ from app.routers import report
 from app.routers import agent
 from app.routers import approvals
 from app.routers import automation
+from app.routers import automl
 
 app = FastAPI(title="Nexus AI Backend", version="0.1.0")
 
@@ -37,6 +38,7 @@ app.include_router(report.router)
 app.include_router(agent.router)
 app.include_router(approvals.router)
 app.include_router(automation.router)
+app.include_router(automl.router)
 
 
 @app.get("/")
