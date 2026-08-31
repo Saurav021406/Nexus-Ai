@@ -186,10 +186,20 @@ interface ChatSource {
   score?: number | null
 }
 
+interface ChatConsensus {
+  models_used: string[]
+  ranking: string[]
+  agreement_score: number
+  confidence: number
+  contradictions: string[]
+  synthesis_notes: string[]
+}
+
 interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
   sources?: ChatSource[] | null
+  consensus?: ChatConsensus | null
 }
 
 interface ForecastColumnsInfo {
@@ -481,6 +491,7 @@ export default function UploadDataset({
   const [agentStreamResult, setAgentStreamResult] = useState<AgentStreamDone | null>(null)
   const [agentStreamError, setAgentStreamError] = useState<string | null>(null)
   const [showFullDataSummary, setShowFullDataSummary] = useState(false)
+  const [expandedReasoning, setExpandedReasoning] = useState<Set<number>>(new Set())
   const [reportVersions, setReportVersions] = useState<ReportVersion[]>([])
   const [showVersionHistory, setShowVersionHistory] = useState(false)
   const [versionsLoading, setVersionsLoading] = useState(false)
@@ -549,6 +560,7 @@ export default function UploadDataset({
     setReportEditingSummary(false)
     setShowAgentDiscussion(false)
     setMessages([])
+    setExpandedReasoning(new Set())
     setChatError(null)
     setForecastColumns(null)
     setForecastColumnsError(null)
@@ -944,7 +956,7 @@ export default function UploadDataset({
       const data = await response.json()
       setMessages((prev) => [
         ...prev,
-        { role: 'assistant', content: data.answer, sources: data.sources ?? null },
+        { role: 'assistant', content: data.answer, sources: data.sources ?? null, consensus: data.consensus ?? null },
       ])
       setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50)
     } catch (err) {
@@ -2264,6 +2276,44 @@ export default function UploadDataset({
                           [Excerpt {s.excerpt_number}]
                         </button>
                       ))}
+                    </div>
+                  )}
+                  {msg.role === 'assistant' && msg.consensus && (
+                    <div className="mt-2 border-t border-slate-700 pt-2 text-xs text-slate-400">
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                        <span>Confidence: {Math.round(msg.consensus.confidence * 100)}%</span>
+                        {msg.consensus.models_used.length > 0 && (
+                          <span>Models: {msg.consensus.models_used.join(', ')}</span>
+                        )}
+                        {msg.consensus.contradictions.length > 0 && (
+                          <span className="text-amber-400">
+                            {msg.consensus.contradictions.length} contradiction
+                            {msg.consensus.contradictions.length === 1 ? '' : 's'} found
+                          </span>
+                        )}
+                        {msg.consensus.synthesis_notes.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpandedReasoning((prev) => {
+                                const next = new Set(prev)
+                                next.has(i) ? next.delete(i) : next.add(i)
+                                return next
+                              })
+                            }
+                            className="font-medium text-cyan-400 hover:text-cyan-300"
+                          >
+                            {expandedReasoning.has(i) ? 'Hide reasoning' : 'Show reasoning'}
+                          </button>
+                        )}
+                      </div>
+                      {expandedReasoning.has(i) && msg.consensus.synthesis_notes.length > 0 && (
+                        <ul className="mt-1.5 list-inside list-disc space-y-0.5 text-slate-500">
+                          {msg.consensus.synthesis_notes.map((note, n) => (
+                            <li key={n}>{note}</li>
+                          ))}
+                        </ul>
+                      )}
                     </div>
                   )}
                 </div>
