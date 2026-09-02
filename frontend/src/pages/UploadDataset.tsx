@@ -170,6 +170,26 @@ interface AgentResult {
   error?: string
 }
 
+interface UsageStats {
+  since: number
+  counters: {
+    cache_hits: number
+    cache_misses: number
+    domain_gate_rejections: number
+    evidence_gate_rejections: number
+    consensus_calls_fast: number
+    consensus_calls_full: number
+  }
+  cache_hit_rate: number | null
+  total_calls_avoided: number
+  estimated_tokens_saved: {
+    from_avoided_calls: number
+    from_fast_tier_usage: number
+    total: number
+    methodology: string
+  }
+}
+
 interface HistoryItem {
   id: string
   filename: string
@@ -200,6 +220,76 @@ interface ChatMessage {
   content: string
   sources?: ChatSource[] | null
   consensus?: ChatConsensus | null
+}
+
+interface AutoMLModelResult {
+  name: string
+  cv_score_mean: number
+  cv_score_std: number
+  cv_metric: string
+  test_metrics: Record<string, number | string>
+}
+
+interface AutoMLShapFeature {
+  feature: string
+  importance: number
+}
+
+interface AutoMLBusinessSummary {
+  summary: string
+  key_metrics: string[]
+  recommendation: string
+}
+
+interface AutoMLClassImbalance {
+  detected: boolean
+  ratio: number
+  class_counts: Record<string, number>
+}
+
+interface AutoMLResult {
+  problem_type: 'classification' | 'regression'
+  target_column: string
+  feature_columns: string[]
+  n_rows_used: number
+  n_rows_dropped: number
+  primary_metric: string
+  best_model_name: string
+  model_id: string | null
+  models: AutoMLModelResult[]
+  shap_importances: AutoMLShapFeature[]
+  shap_unavailable_reason: string | null
+  warnings: string[]
+  excluded_id_columns: string[]
+  class_imbalance: AutoMLClassImbalance | null
+  business_summary: AutoMLBusinessSummary
+  version_id: string
+  version_number: number
+}
+
+interface AutoMLVersion {
+  id: string
+  version_number: number
+  created_at: string
+  problem_type: string
+  target_column: string
+  best_model_name: string
+  models: AutoMLModelResult[]
+}
+
+interface AutoMLPredictResponse {
+  predictions: (string | number)[]
+  model_id: string
+  n_rows: number
+  probabilities?: Record<string, number>[]
+}
+
+interface AutoMLClusterResult {
+  n_clusters: number
+  silhouette_score: number
+  cluster_sizes: Record<string, number>
+  cluster_profiles: Record<string, Record<string, number>>
+  feature_columns: string[]
 }
 
 interface ForecastColumnsInfo {
@@ -241,6 +331,16 @@ interface CleanResult {
   report: CleanReport
   preview_rows: Record<string, string>[]
   columns: string[]
+  version_id: string
+  version_number: number
+}
+
+interface CleaningVersion {
+  id: string
+  version_number: number
+  created_at: string
+  report: CleanReport
+  options: Record<string, unknown>
 }
 
 interface CorrelationResult {
@@ -279,7 +379,7 @@ interface VizGenerateResponse {
   interpreted: boolean
 }
 
-export type WorkspaceTab = 'upload' | 'profile' | 'analysis' | 'agent' | 'chat' | 'forecast' | 'clean' | 'eda' | 'visualize' | 'history'
+export type WorkspaceTab = 'upload' | 'profile' | 'analysis' | 'agent' | 'chat' | 'forecast' | 'automl' | 'clean' | 'eda' | 'visualize' | 'history' | 'usage'
 
 interface UploadDatasetProps {
   activeTab: WorkspaceTab
@@ -508,6 +608,23 @@ export default function UploadDataset({
 
   const [forecastColumns, setForecastColumns] = useState<ForecastColumnsInfo | null>(null)
   const [forecastColumnsError, setForecastColumnsError] = useState<string | null>(null)
+  const [automlTargetColumn, setAutomlTargetColumn] = useState('')
+  const [automlProblemType, setAutomlProblemType] = useState<'auto' | 'classification' | 'regression'>('auto')
+  const [automlRunning, setAutomlRunning] = useState(false)
+  const [automlError, setAutomlError] = useState<string | null>(null)
+  const [automlResult, setAutomlResult] = useState<AutoMLResult | null>(null)
+  const [automlMode, setAutomlMode] = useState<'train' | 'cluster'>('train')
+  const [automlPredictInputs, setAutomlPredictInputs] = useState<Record<string, string>>({})
+  const [automlPredicting, setAutomlPredicting] = useState(false)
+  const [automlPredictError, setAutomlPredictError] = useState<string | null>(null)
+  const [automlPredictResult, setAutomlPredictResult] = useState<AutoMLPredictResponse | null>(null)
+  const [clusterFeatureColumns, setClusterFeatureColumns] = useState<string[]>([])
+  const [clustering, setClustering] = useState(false)
+  const [clusterError, setClusterError] = useState<string | null>(null)
+  const [clusterResult, setClusterResult] = useState<AutoMLClusterResult | null>(null)
+  const [automlVersions, setAutomlVersions] = useState<AutoMLVersion[]>([])
+  const [automlVersionsLoading, setAutomlVersionsLoading] = useState(false)
+  const [automlVersionsError, setAutomlVersionsError] = useState<string | null>(null)
   const [selectedTarget, setSelectedTarget] = useState<string>('')
   const [forecasting, setForecasting] = useState(false)
   const [forecastError, setForecastError] = useState<string | null>(null)
@@ -516,6 +633,9 @@ export default function UploadDataset({
   const [history, setHistory] = useState<HistoryItem[]>([])
   const [historyLoading, setHistoryLoading] = useState(false)
   const [historyError, setHistoryError] = useState<string | null>(null)
+  const [usageStats, setUsageStats] = useState<UsageStats | null>(null)
+  const [usageLoading, setUsageLoading] = useState(false)
+  const [usageError, setUsageError] = useState<string | null>(null)
   const [openingId, setOpeningId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
@@ -529,6 +649,11 @@ export default function UploadDataset({
   const [cleaning, setCleaning] = useState(false)
   const [cleanError, setCleanError] = useState<string | null>(null)
   const [cleanResult, setCleanResult] = useState<CleanResult | null>(null)
+  const [cleanDownloading, setCleanDownloading] = useState(false)
+  const [cleanDownloadError, setCleanDownloadError] = useState<string | null>(null)
+  const [cleaningVersions, setCleaningVersions] = useState<CleaningVersion[]>([])
+  const [cleaningVersionsLoading, setCleaningVersionsLoading] = useState(false)
+  const [cleaningVersionsError, setCleaningVersionsError] = useState<string | null>(null)
 
   const [correlation, setCorrelation] = useState<CorrelationResult | null>(null)
   const [correlationError, setCorrelationError] = useState<string | null>(null)
@@ -607,6 +732,31 @@ export default function UploadDataset({
   useEffect(() => {
     if (activeTab === 'history') {
       loadHistory()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab])
+
+  async function loadUsageStats() {
+    setUsageLoading(true)
+    setUsageError(null)
+    try {
+      const headers = await authHeader()
+      const response = await fetch(`${API_BASE_URL}/stats/usage`, { headers })
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Could not load usage stats (${response.status})`)
+      }
+      setUsageStats(await response.json())
+    } catch (err) {
+      setUsageError((err as Error).message)
+    } finally {
+      setUsageLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab === 'usage') {
+      loadUsageStats()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab])
@@ -703,6 +853,48 @@ export default function UploadDataset({
     } finally {
       setAnalyzing(false)
     }
+  }
+
+  function handleExportAgentTranscript() {
+    if (agentStreamEvents.length === 0 && !agentStreamResult) return
+
+    const lines: string[] = [
+      `# Multi-Agent run transcript${result?.filename ? ` - ${result.filename}` : ''}`,
+      `Exported ${new Date().toLocaleString()}`,
+      '',
+      `**Question:** ${agentQuery}`,
+      '',
+      '## Live progress',
+      '',
+    ]
+
+    for (const event of agentStreamEvents) {
+      lines.push(`- **${event.agent}** - ${event.message}`)
+    }
+
+    if (agentStreamResult) {
+      lines.push('')
+      lines.push('## Final answer')
+      lines.push('')
+      lines.push(`Status: ${agentStreamResult.status}`)
+      if (agentStreamResult.result?.summary) {
+        lines.push('')
+        lines.push(agentStreamResult.result.summary)
+      }
+      if (agentStreamResult.result?.key_metrics && agentStreamResult.result.key_metrics.length > 0) {
+        lines.push('')
+        for (const m of agentStreamResult.result.key_metrics) {
+          lines.push(`- ${m}`)
+        }
+      }
+      if (agentStreamResult.result?.recommendation) {
+        lines.push('')
+        lines.push(`**Recommendation:** ${agentStreamResult.result.recommendation}`)
+      }
+    }
+
+    const baseName = result?.filename?.includes('.') ? result.filename.split('.').slice(0, -1).join('.') : 'agent'
+    downloadTextFile(`${baseName}_agent_transcript.md`, lines.join('\n'))
   }
 
   async function handleRunAgentStream() {
@@ -925,6 +1117,37 @@ export default function UploadDataset({
     }
   }
 
+  function handleExportChatTranscript() {
+    if (messages.length === 0) return
+
+    const lines: string[] = [
+      `# Chat transcript${result?.filename ? ` - ${result.filename}` : ''}`,
+      `Exported ${new Date().toLocaleString()}`,
+      '',
+    ]
+
+    for (const msg of messages) {
+      lines.push(`**${msg.role === 'user' ? 'You' : 'Assistant'}:** ${msg.content}`)
+      if (msg.sources && msg.sources.length > 0) {
+        lines.push('')
+        lines.push('Sources:')
+        for (const s of msg.sources) {
+          lines.push(`- [Excerpt ${s.excerpt_number}] ${s.preview}`)
+        }
+      }
+      if (msg.consensus) {
+        lines.push('')
+        lines.push(
+          `_Confidence: ${Math.round(msg.consensus.confidence * 100)}% - Models: ${msg.consensus.models_used.join(', ')}_`
+        )
+      }
+      lines.push('')
+    }
+
+    const baseName = result?.filename?.includes('.') ? result.filename.split('.').slice(0, -1).join('.') : 'chat'
+    downloadTextFile(`${baseName}_chat_transcript.md`, lines.join('\n'))
+  }
+
   async function handleAskQuestion(e: React.FormEvent) {
     e.preventDefault()
     if (!result || !question.trim() || asking) return
@@ -1022,6 +1245,127 @@ export default function UploadDataset({
     }
   }
 
+  async function handleRunAutoML() {
+    if (!result || !automlTargetColumn) return
+    setAutomlRunning(true)
+    setAutomlError(null)
+    setAutomlResult(null)
+    setAutomlPredictInputs({})
+    setAutomlPredictResult(null)
+    setAutomlPredictError(null)
+
+    try {
+      const headers = await authHeader()
+      const response = await fetch(`${API_BASE_URL}/automl/run`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataset_id: result.dataset_id,
+          target_column: automlTargetColumn,
+          problem_type: automlProblemType === 'auto' ? null : automlProblemType,
+        }),
+      })
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `AutoML run failed (${response.status})`)
+      }
+      setAutomlResult(await response.json())
+      loadAutomlVersions()
+    } catch (err) {
+      setAutomlError((err as Error).message)
+    } finally {
+      setAutomlRunning(false)
+    }
+  }
+
+  async function loadAutomlVersions() {
+    if (!result) return
+    setAutomlVersionsLoading(true)
+    setAutomlVersionsError(null)
+    try {
+      const headers = await authHeader()
+      const response = await fetch(
+        `${API_BASE_URL}/automl/versions?dataset_id=${encodeURIComponent(result.dataset_id)}`,
+        { headers }
+      )
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Could not load AutoML history (${response.status})`)
+      }
+      const body = await response.json()
+      setAutomlVersions(body.versions)
+    } catch (err) {
+      setAutomlVersionsError((err as Error).message)
+    } finally {
+      setAutomlVersionsLoading(false)
+    }
+  }
+
+  async function handleAutoMLPredict() {
+    if (!automlResult?.model_id) return
+    setAutomlPredicting(true)
+    setAutomlPredictError(null)
+    setAutomlPredictResult(null)
+
+    try {
+      const headers = await authHeader()
+      // Numbers are sent as numbers (not strings) so the backend's numeric
+      // imputer/scaler treat them correctly - a blank field is simply
+      // omitted so the trained imputer fills it in, same as a missing
+      // value anywhere else in this app.
+      const row: Record<string, string | number> = {}
+      for (const col of automlResult.feature_columns) {
+        const raw = automlPredictInputs[col]
+        if (raw === undefined || raw.trim() === '') continue
+        const asNumber = Number(raw)
+        row[col] = Number.isNaN(asNumber) ? raw : asNumber
+      }
+
+      const response = await fetch(`${API_BASE_URL}/automl/predict`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_id: automlResult.model_id, rows: [row] }),
+      })
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Prediction failed (${response.status})`)
+      }
+      setAutomlPredictResult(await response.json())
+    } catch (err) {
+      setAutomlPredictError((err as Error).message)
+    } finally {
+      setAutomlPredicting(false)
+    }
+  }
+
+  async function handleRunClustering() {
+    if (!result) return
+    setClustering(true)
+    setClusterError(null)
+    setClusterResult(null)
+
+    try {
+      const headers = await authHeader()
+      const response = await fetch(`${API_BASE_URL}/automl/cluster`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataset_id: result.dataset_id,
+          feature_columns: clusterFeatureColumns.length > 0 ? clusterFeatureColumns : null,
+        }),
+      })
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Clustering failed (${response.status})`)
+      }
+      setClusterResult(await response.json())
+    } catch (err) {
+      setClusterError((err as Error).message)
+    } finally {
+      setClustering(false)
+    }
+  }
+
   async function loadQualityReport() {
     if (!result) return
     setQualityLoading(true)
@@ -1052,11 +1396,26 @@ export default function UploadDataset({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, result])
 
+  useEffect(() => {
+    if (activeTab === 'clean' && result) {
+      loadCleaningVersions()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, result])
+
+  useEffect(() => {
+    if (activeTab === 'automl' && result) {
+      loadAutomlVersions()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, result])
+
   async function handleApplyCleaning() {
     if (!result) return
     setCleaning(true)
     setCleanError(null)
     setCleanResult(null)
+    setCleanDownloadError(null)
 
     try {
       const headers = await authHeader()
@@ -1076,10 +1435,70 @@ export default function UploadDataset({
         throw new Error(errBody.detail || `Cleaning failed (${response.status})`)
       }
       setCleanResult(await response.json())
+      loadCleaningVersions()
     } catch (err) {
       setCleanError((err as Error).message)
     } finally {
       setCleaning(false)
+    }
+  }
+
+  async function handleDownloadCleaned(versionId?: string, versionNumber?: number) {
+    if (!result) return
+    setCleanDownloading(true)
+    setCleanDownloadError(null)
+
+    try {
+      const headers = await authHeader()
+      const response = await fetch(`${API_BASE_URL}/clean/download`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dataset_id: result.dataset_id, version_id: versionId ?? null }),
+      })
+
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Download failed (${response.status})`)
+      }
+
+      const blob = await response.blob()
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      const baseName = result.filename?.includes('.') ? result.filename.split('.').slice(0, -1).join('.') : result.filename || 'dataset'
+      const suffix = versionNumber ? `_cleaned_v${versionNumber}` : '_cleaned'
+      a.download = `${baseName}${suffix}.csv`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      window.URL.revokeObjectURL(url)
+    } catch (err) {
+      setCleanDownloadError((err as Error).message)
+    } finally {
+      setCleanDownloading(false)
+    }
+  }
+
+  async function loadCleaningVersions() {
+    if (!result) return
+    setCleaningVersionsLoading(true)
+    setCleaningVersionsError(null)
+    try {
+      const headers = await authHeader()
+      const response = await fetch(
+        `${API_BASE_URL}/clean/versions?dataset_id=${encodeURIComponent(result.dataset_id)}`,
+        { headers }
+      )
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Could not load cleaning history (${response.status})`)
+      }
+      const body = await response.json()
+      setCleaningVersions(body.versions)
+    } catch (err) {
+      setCleaningVersionsError((err as Error).message)
+    } finally {
+      setCleaningVersionsLoading(false)
     }
   }
 
@@ -1291,10 +1710,12 @@ export default function UploadDataset({
     { id: 'agent', label: 'Multi-Agent', disabled: !result },
     { id: 'chat', label: 'Ask your data', disabled: !result },
     { id: 'forecast', label: 'Forecast', disabled: !result || result?.kind === 'document' },
+    { id: 'automl', label: 'AutoML', disabled: !result || result?.kind === 'document' },
     { id: 'clean', label: 'Clean Data', disabled: !result || result?.kind === 'document' },
     { id: 'eda', label: 'EDA & Charts', disabled: !result || result?.kind === 'document' },
     { id: 'visualize', label: 'Visualize', disabled: !result || result?.kind === 'document' },
     { id: 'history', label: 'History' },
+    { id: 'usage', label: 'Usage' },
   ]
 
   return (
@@ -2084,7 +2505,17 @@ export default function UploadDataset({
       {result && activeTab === 'agent' && (
         <div className="space-y-4 py-6">
           <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
-            <p className="text-sm font-semibold text-slate-100">Multi-Agent Analysis</p>
+            <div className="flex items-start justify-between gap-3">
+              <p className="text-sm font-semibold text-slate-100">Multi-Agent Analysis</p>
+              {(agentStreamEvents.length > 0 || agentStreamResult) && (
+                <button
+                  onClick={handleExportAgentTranscript}
+                  className="shrink-0 rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700"
+                >
+                  Export transcript
+                </button>
+              )}
+            </div>
             <p className="mb-3 text-xs text-slate-400">
               Ask a question in plain English. The Manager Agent plans the work, delegates
               to specialists, and shows its progress live as it happens.
@@ -2236,13 +2667,23 @@ export default function UploadDataset({
       {/* ---------- Chat tab ---------- */}
       {result && activeTab === 'chat' && (
         <div className="space-y-4 py-6">
-          <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4">
-            <h3 className="font-medium text-white">Ask your data</h3>
-            <p className="mt-1 text-sm text-slate-400">
-              {result.kind === 'document'
-                ? 'Ask questions in plain English. Answers are grounded only in retrieved excerpts from this document - never outside knowledge.'
-                : 'Ask questions in plain English. Answers use the exact, full-dataset statistics - never guesses from a sample.'}
-            </p>
+          <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4 flex items-start justify-between gap-3">
+            <div>
+              <h3 className="font-medium text-white">Ask your data</h3>
+              <p className="mt-1 text-sm text-slate-400">
+                {result.kind === 'document'
+                  ? 'Ask questions in plain English. Answers are grounded only in retrieved excerpts from this document - never outside knowledge.'
+                  : 'Ask questions in plain English. Answers use the exact, full-dataset statistics - never guesses from a sample.'}
+              </p>
+            </div>
+            {messages.length > 0 && (
+              <button
+                onClick={handleExportChatTranscript}
+                className="shrink-0 rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700"
+              >
+                Export transcript
+              </button>
+            )}
           </div>
 
           <div className="rounded-xl border border-slate-800 bg-slate-900 flex flex-col h-[420px]">
@@ -2431,6 +2872,364 @@ export default function UploadDataset({
         </div>
       )}
 
+      {/* ---------- AutoML tab (Phase 5) ---------- */}
+      {result && result.kind !== 'document' && activeTab === 'automl' && (
+        <div className="space-y-4 py-6">
+          <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4">
+            <h3 className="font-medium text-white">AutoML - train and compare real models</h3>
+            <p className="mt-1 text-sm text-slate-400">
+              Trains multiple real models (Logistic/Linear Regression, Random Forest, XGBoost, LightGBM),
+              cross-validates each, and picks the best by held-out test performance - with real SHAP
+              feature importance, not an AI guess.
+            </p>
+          </div>
+
+          <div className="flex gap-2">
+            <button
+              onClick={() => setAutomlMode('train')}
+              className={`rounded-lg px-3 py-1.5 text-sm font-medium ${
+                automlMode === 'train' ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+              }`}
+            >
+              Supervised (train &amp; compare)
+            </button>
+            <button
+              onClick={() => setAutomlMode('cluster')}
+              className={`rounded-lg px-3 py-1.5 text-sm font-medium ${
+                automlMode === 'cluster' ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+              }`}
+            >
+              Clustering (find groups)
+            </button>
+          </div>
+
+          {automlMode === 'train' && (
+          <>
+          <div className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:flex-wrap">
+              <label className="text-sm text-slate-400">Target column:</label>
+              <select
+                value={automlTargetColumn}
+                onChange={(e) => setAutomlTargetColumn(e.target.value)}
+                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-blue-500"
+              >
+                <option value="">Select a column...</option>
+                {(result.columns ?? []).map((col) => (
+                  <option key={col.name} value={col.name}>
+                    {col.name} ({col.dtype})
+                  </option>
+                ))}
+              </select>
+
+              <label className="text-sm text-slate-400">Problem type:</label>
+              <select
+                value={automlProblemType}
+                onChange={(e) => setAutomlProblemType(e.target.value as typeof automlProblemType)}
+                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-blue-500"
+              >
+                <option value="auto">Auto-detect</option>
+                <option value="classification">Classification</option>
+                <option value="regression">Regression</option>
+              </select>
+
+              <button
+                onClick={handleRunAutoML}
+                disabled={automlRunning || !automlTargetColumn}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+              >
+                {automlRunning ? 'Training models...' : 'Run AutoML'}
+              </button>
+            </div>
+          </div>
+
+          {automlError && <ErrorBanner message={automlError} />}
+
+          {automlResult && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+                <Stat label="Problem type" value={automlResult.problem_type} isText />
+                <Stat label="Best model" value={automlResult.best_model_name} isText />
+                <Stat label="Rows used" value={automlResult.n_rows_used} />
+
+                <Stat label="Rows dropped" value={automlResult.n_rows_dropped} />
+              </div>
+
+              {(automlResult.warnings.length > 0 || automlResult.class_imbalance) && (
+                <div className="rounded-xl border border-amber-800 bg-amber-950/30 p-4 space-y-1.5">
+                  <h4 className="text-sm font-semibold text-amber-300">Data quality notes</h4>
+                  <ul className="list-inside list-disc text-sm text-amber-200/90">
+                    {automlResult.warnings.map((w, i) => (
+                      <li key={i}>{w}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              <div className="rounded-xl border border-slate-800 overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-900 text-slate-400">
+                    <tr>
+                      <th className="text-left p-2">Model</th>
+                      <th className="text-left p-2">
+                        CV {automlResult.primary_metric} (mean ± std)
+                      </th>
+                      <th className="text-left p-2">Test metrics</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {automlResult.models.map((m) => (
+                      <tr
+                        key={m.name}
+                        className={`border-t border-slate-800 ${
+                          m.name === automlResult.best_model_name ? 'bg-blue-950/30' : ''
+                        }`}
+                      >
+                        <td className="p-2 font-medium text-slate-200">
+                          {m.name}
+                          {m.name === automlResult.best_model_name && (
+                            <span className="ml-2 rounded-full bg-blue-600 px-2 py-0.5 text-xs text-white">
+                              Best
+                            </span>
+                          )}
+                        </td>
+                        <td className="p-2 text-slate-300">
+                          {Number.isFinite(m.cv_score_mean) ? `${m.cv_score_mean} ± ${m.cv_score_std}` : '—'}
+                        </td>
+                        <td className="p-2 text-slate-400">
+                          {'error' in m.test_metrics
+                            ? String(m.test_metrics.error)
+                            : Object.entries(m.test_metrics)
+                                .map(([k, v]) => `${k}: ${v}`)
+                                .join(' · ')}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="rounded-xl border border-slate-800 bg-slate-900 p-4">
+                <h4 className="mb-2 text-sm font-medium text-slate-300">
+                  Top features (SHAP importance)
+                </h4>
+                {automlResult.shap_importances.length > 0 ? (
+                  <div className="space-y-1.5">
+                    {automlResult.shap_importances.map((f) => {
+                      const maxImportance = automlResult.shap_importances[0].importance || 1
+                      const widthPct = Math.max(4, Math.round((f.importance / maxImportance) * 100))
+                      return (
+                        <div key={f.feature} className="flex items-center gap-2 text-xs">
+                          <span className="w-40 truncate text-slate-400">{f.feature}</span>
+                          <div className="h-2 flex-1 rounded-full bg-slate-800">
+                            <div
+                              className="h-2 rounded-full bg-cyan-500"
+                              style={{ width: `${widthPct}%` }}
+                            />
+                          </div>
+                          <span className="w-16 text-right text-slate-500">{f.importance}</span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-500">
+                    {automlResult.shap_unavailable_reason || 'No feature importance available.'}
+                  </p>
+                )}
+              </div>
+
+              <div className="rounded-xl border border-blue-800 bg-blue-950/30 p-4 space-y-2">
+                <h4 className="text-sm font-semibold text-blue-300">Business summary</h4>
+                <p className="text-sm text-slate-200">{automlResult.business_summary.summary}</p>
+                {automlResult.business_summary.key_metrics.length > 0 && (
+                  <ul className="list-inside list-disc text-sm text-slate-300">
+                    {automlResult.business_summary.key_metrics.map((k, i) => (
+                      <li key={i}>{k}</li>
+                    ))}
+                  </ul>
+                )}
+                {automlResult.business_summary.recommendation && (
+                  <p className="text-sm text-indigo-300">{automlResult.business_summary.recommendation}</p>
+                )}
+              </div>
+
+              {automlResult.model_id && (
+                <div className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-3">
+                  <h4 className="text-sm font-medium text-slate-300">
+                    Predict on a new row with the best model ({automlResult.best_model_name})
+                  </h4>
+                  <p className="text-xs text-slate-500">
+                    Leave a field blank to let the model fill it in the same way it handled missing
+                    values during training.
+                  </p>
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                    {automlResult.feature_columns.map((col) => (
+                      <div key={col} className="flex flex-col gap-1">
+                        <label className="text-xs text-slate-400">{col}</label>
+                        <input
+                          type="text"
+                          value={automlPredictInputs[col] ?? ''}
+                          onChange={(e) =>
+                            setAutomlPredictInputs((prev) => ({ ...prev, [col]: e.target.value }))
+                          }
+                          className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:border-blue-500"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  <button
+                    onClick={handleAutoMLPredict}
+                    disabled={automlPredicting}
+                    className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+                  >
+                    {automlPredicting ? 'Predicting...' : 'Predict'}
+                  </button>
+
+                  {automlPredictError && <ErrorBanner message={automlPredictError} />}
+
+                  {automlPredictResult && (
+                    <div className="rounded-lg border border-emerald-800 bg-emerald-950/30 p-3 text-sm">
+                      <p className="text-emerald-300">
+                        Prediction: <span className="font-semibold">{String(automlPredictResult.predictions[0])}</span>
+                      </p>
+                      {automlPredictResult.probabilities && (
+                        <ul className="mt-1 text-xs text-emerald-200/80">
+                          {Object.entries(automlPredictResult.probabilities[0]).map(([cls, prob]) => (
+                            <li key={cls}>
+                              {cls}: {(prob * 100).toFixed(1)}%
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+          </>
+          )}
+
+          {automlMode === 'cluster' && (
+          <>
+          <div className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-3">
+            <p className="text-sm text-slate-400">
+              Finds natural groupings in the data with KMeans - the number of clusters is chosen
+              automatically (silhouette score). No target column needed.
+            </p>
+            <div className="flex flex-col gap-2">
+              <label className="text-sm text-slate-400">
+                Feature columns (leave all unchecked to use every numeric column):
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {(result.columns ?? [])
+                  .filter((col) => col.dtype.toLowerCase().includes('int') || col.dtype.toLowerCase().includes('float'))
+                  .map((col) => {
+                    const checked = clusterFeatureColumns.includes(col.name)
+                    return (
+                      <button
+                        key={col.name}
+                        type="button"
+                        onClick={() =>
+                          setClusterFeatureColumns((prev) =>
+                            checked ? prev.filter((c) => c !== col.name) : [...prev, col.name]
+                          )
+                        }
+                        className={`rounded-full px-3 py-1 text-xs font-medium ${
+                          checked ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                        }`}
+                      >
+                        {col.name}
+                      </button>
+                    )
+                  })}
+              </div>
+            </div>
+            <button
+              onClick={handleRunClustering}
+              disabled={clustering}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+            >
+              {clustering ? 'Clustering...' : 'Run clustering'}
+            </button>
+          </div>
+
+          {clusterError && <ErrorBanner message={clusterError} />}
+
+          {clusterResult && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+                <Stat label="Clusters found" value={clusterResult.n_clusters} />
+                <Stat label="Silhouette score" value={clusterResult.silhouette_score} />
+                <Stat label="Features used" value={clusterResult.feature_columns.length} />
+              </div>
+
+              <div className="rounded-xl border border-slate-800 overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-900 text-slate-400">
+                    <tr>
+                      <th className="text-left p-2">Cluster</th>
+                      <th className="text-left p-2">Size</th>
+                      {clusterResult.feature_columns.map((col) => (
+                        <th key={col} className="text-left p-2">
+                          {col} (mean)
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(clusterResult.cluster_profiles).map(([clusterId, profile]) => (
+                      <tr key={clusterId} className="border-t border-slate-800">
+                        <td className="p-2 font-medium text-slate-200">Cluster {clusterId}</td>
+                        <td className="p-2 text-slate-300">{clusterResult.cluster_sizes[clusterId]}</td>
+                        {clusterResult.feature_columns.map((col) => (
+                          <td key={col} className="p-2 text-slate-400">
+                            {profile[col]}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+          </>
+          )}
+
+          {automlVersionsError && <ErrorBanner message={automlVersionsError} />}
+
+          {automlVersionsLoading && automlVersions.length === 0 && (
+            <p className="text-xs text-slate-500">Loading AutoML history...</p>
+          )}
+
+          {automlVersions.length > 0 && (
+            <div className="rounded-xl border border-slate-800 bg-slate-900 p-4">
+              <h4 className="mb-2 text-sm font-medium text-slate-300">
+                Run history ({automlVersions.length} run{automlVersions.length === 1 ? '' : 's'})
+              </h4>
+              <div className="divide-y divide-slate-800">
+                {automlVersions.map((v) => (
+                  <div key={v.id} className="flex flex-wrap items-center justify-between gap-1 py-2 text-sm">
+                    <div>
+                      <span className="font-medium text-slate-200">Run {v.version_number}</span>
+                      <span className="ml-2 text-xs text-slate-500">
+                        {new Date(v.created_at).toLocaleString()} &middot; {v.problem_type} on "{v.target_column}"
+                        &middot; best: {v.best_model_name}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <p className="mt-2 text-xs text-slate-500">
+                Past runs show metrics only - a trained model can only be used for new predictions for
+                1 hour after training, so older runs can't be re-predicted on without running again.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ---------- Clean Data tab ---------- */}
       {result && result.kind !== 'document' && activeTab === 'clean' && (
         <div className="space-y-4 py-6">
@@ -2513,7 +3312,17 @@ export default function UploadDataset({
 
           {cleanResult && (
             <div className="rounded-xl border border-emerald-800 bg-emerald-950/30 p-4 space-y-4">
-              <h4 className="text-sm font-medium text-emerald-300">Before vs After</h4>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h4 className="text-sm font-medium text-emerald-300">Before vs After</h4>
+                <button
+                  onClick={() => handleDownloadCleaned()}
+                  disabled={cleanDownloading}
+                  className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+                >
+                  {cleanDownloading ? 'Downloading...' : 'Download cleaned CSV'}
+                </button>
+              </div>
+              {cleanDownloadError && <ErrorBanner message={cleanDownloadError} />}
               <div className="rounded-xl border border-slate-800 overflow-hidden">
                 <table className="w-full text-sm">
                   <thead className="bg-slate-900 text-slate-400">
@@ -2569,6 +3378,40 @@ export default function UploadDataset({
                     </tbody>
                   </table>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {cleaningVersionsError && <ErrorBanner message={cleaningVersionsError} />}
+
+          {cleaningVersionsLoading && cleaningVersions.length === 0 && (
+            <p className="text-xs text-slate-500">Loading cleaning history...</p>
+          )}
+
+          {cleaningVersions.length > 0 && (
+            <div className="rounded-xl border border-slate-800 bg-slate-900 p-4">
+              <h4 className="mb-2 text-sm font-medium text-slate-300">
+                Cleaning history ({cleaningVersions.length} version{cleaningVersions.length === 1 ? '' : 's'})
+              </h4>
+              <div className="divide-y divide-slate-800">
+                {cleaningVersions.map((v) => (
+                  <div key={v.id} className="flex items-center justify-between py-2 text-sm">
+                    <div>
+                      <span className="font-medium text-slate-200">Version {v.version_number}</span>
+                      <span className="ml-2 text-xs text-slate-500">
+                        {new Date(v.created_at).toLocaleString()} &middot; {v.report.after.row_count} rows,{' '}
+                        {v.report.after.missing_values} missing, {v.report.after.duplicate_rows} duplicates
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => handleDownloadCleaned(v.id, v.version_number)}
+                      disabled={cleanDownloading}
+                      className="rounded-lg bg-slate-800 px-3 py-1 text-xs font-medium text-slate-200 hover:bg-slate-700 disabled:opacity-50"
+                    >
+                      Download
+                    </button>
+                  </div>
+                ))}
               </div>
             </div>
           )}
@@ -2936,6 +3779,84 @@ export default function UploadDataset({
           )}
         </div>
       )}
+
+      {/* ---------- Usage / cost savings dashboard ---------- */}
+      {activeTab === 'usage' && (
+        <div className="space-y-4 py-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-lg font-medium text-white">Usage &amp; savings</h3>
+              <p className="text-sm text-slate-400">
+                App-wide (not per-user), since this app started running. Domain Gate and Evidence Gate
+                block off-topic or unsupported questions before any LLM call happens; caching returns
+                repeated questions instantly; fast-tier consensus uses one model with fallback instead
+                of querying all three providers.
+              </p>
+            </div>
+            <button
+              onClick={loadUsageStats}
+              disabled={usageLoading}
+              className="text-xs text-slate-400 hover:text-slate-200 disabled:opacity-50"
+            >
+              {usageLoading ? 'Refreshing...' : 'Refresh'}
+            </button>
+          </div>
+
+          {usageError && <ErrorBanner message={usageError} />}
+
+          {usageStats && (
+            <>
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+                <Stat label="LLM calls avoided" value={usageStats.total_calls_avoided} />
+                <Stat
+                  label="Cache hit rate"
+                  value={usageStats.cache_hit_rate !== null ? `${Math.round(usageStats.cache_hit_rate * 100)}%` : 'n/a'}
+                  isText
+                />
+                <Stat label="Fast-tier calls" value={usageStats.counters.consensus_calls_fast} />
+                <Stat label="Full-tier calls" value={usageStats.counters.consensus_calls_full} />
+              </div>
+
+              <div className="rounded-xl border border-slate-800 overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-900 text-slate-400">
+                    <tr>
+                      <th className="text-left p-2">Metric</th>
+                      <th className="text-left p-2">Count</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr className="border-t border-slate-800">
+                      <td className="p-2 text-slate-300">Cache hits</td>
+                      <td className="p-2 text-slate-400">{usageStats.counters.cache_hits}</td>
+                    </tr>
+                    <tr className="border-t border-slate-800">
+                      <td className="p-2 text-slate-300">Cache misses</td>
+                      <td className="p-2 text-slate-400">{usageStats.counters.cache_misses}</td>
+                    </tr>
+                    <tr className="border-t border-slate-800">
+                      <td className="p-2 text-slate-300">Domain Gate rejections (no LLM call)</td>
+                      <td className="p-2 text-slate-400">{usageStats.counters.domain_gate_rejections}</td>
+                    </tr>
+                    <tr className="border-t border-slate-800">
+                      <td className="p-2 text-slate-300">Evidence Gate rejections (no LLM call)</td>
+                      <td className="p-2 text-slate-400">{usageStats.counters.evidence_gate_rejections}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="rounded-xl border border-emerald-800 bg-emerald-950/30 p-4 space-y-1.5">
+                <h4 className="text-sm font-semibold text-emerald-300">
+                  Estimated tokens saved: {usageStats.estimated_tokens_saved.total.toLocaleString()}
+                </h4>
+                <p className="text-xs text-emerald-200/70">{usageStats.estimated_tokens_saved.methodology}</p>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       <SourceDrawer source={activeSource} onClose={() => setActiveSource(null)} />
     </section>
   )
@@ -2945,6 +3866,18 @@ function ErrorBanner({ message }: { message: string }) {
   return (
     <div className="rounded-lg border border-red-800 bg-red-950/30 px-3 py-2 text-sm text-red-300">{message}</div>
   )
+}
+
+function downloadTextFile(filename: string, content: string): void {
+  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' })
+  const url = window.URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  window.URL.revokeObjectURL(url)
 }
 
 function agentEventIcon(type: string): string {

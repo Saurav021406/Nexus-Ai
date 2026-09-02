@@ -29,3 +29,25 @@ _fake_supabase_module = types.ModuleType("app.supabase_client")
 _fake_supabase_module.supabase_anon = object()
 _fake_supabase_module.supabase_admin = object()
 sys.modules["app.supabase_client"] = _fake_supabase_module
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    """Global, autouse: services/rate_limiter.py keeps its request counts
+    in a module-level dict that persists for the whole pytest session, not
+    per-test. Without this reset, any test hitting a rate-limited endpoint
+    (e.g. /chat, /agent/run, /automl/run) enough times across the FULL
+    test suite - not just within its own test function - could start
+    failing with 429s it has nothing to do with, purely because of
+    execution order and how many other tests reused the same fake user id
+    before it ran. Resetting before every test removes that cross-test
+    coupling entirely."""
+    from app.services import rate_limiter, usage_stats
+
+    rate_limiter.reset_all()
+    usage_stats.reset_all()
+    yield
+    rate_limiter.reset_all()
+    usage_stats.reset_all()

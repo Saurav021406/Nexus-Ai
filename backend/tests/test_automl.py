@@ -49,7 +49,7 @@ def test_raises_on_all_null_target():
 
 def test_classification_trains_multiple_models_and_picks_a_best_one():
     df, target_col = _classification_df()
-    result, fitted_model, X_test, feature_names = automl.train_and_compare(df, target_col)
+    result, fitted_model, X_test, feature_names, transformer = automl.train_and_compare(df, target_col)
 
     assert result.problem_type == "classification"
     assert len(result.models) >= 2  # at minimum LogisticRegression + RandomForest
@@ -67,7 +67,7 @@ def test_classification_test_metrics_are_genuinely_computed_not_placeholders():
     # score well above chance (0.5) - this is a real check that models
     # are actually being trained and evaluated, not stubbed.
     df, target_col = _classification_df(n_samples=300, n_features=6)
-    result, _, _, _ = automl.train_and_compare(df, target_col)
+    result, _, _, _, _ = automl.train_and_compare(df, target_col)
     best = next(m for m in result.models if m.name == result.best_model_name)
     assert best.test_metrics["accuracy"] > 0.6
 
@@ -76,7 +76,7 @@ def test_classification_test_metrics_are_genuinely_computed_not_placeholders():
 
 def test_regression_trains_multiple_models_and_picks_a_best_one():
     df, target_col = _regression_df()
-    result, fitted_model, X_test, feature_names = automl.train_and_compare(df, target_col)
+    result, fitted_model, X_test, feature_names, transformer = automl.train_and_compare(df, target_col)
 
     assert result.problem_type == "regression"
     assert len(result.models) >= 2
@@ -88,7 +88,7 @@ def test_regression_trains_multiple_models_and_picks_a_best_one():
 
 def test_regression_r2_is_meaningfully_positive_on_a_learnable_signal():
     df, target_col = _regression_df(n_samples=300)
-    result, _, _, _ = automl.train_and_compare(df, target_col)
+    result, _, _, _, _ = automl.train_and_compare(df, target_col)
     best = next(m for m in result.models if m.name == result.best_model_name)
     assert best.test_metrics["r2"] > 0.5
 
@@ -103,7 +103,7 @@ def test_handles_mixed_numeric_and_categorical_features():
         "category": rng.choice(["A", "B", "C"], size=100),
         "target": rng.integers(0, 2, size=100),
     })
-    result, _, _, feature_names = automl.train_and_compare(df, "target")
+    result, _, _, feature_names, _ = automl.train_and_compare(df, "target")
     assert result.n_rows_used == 100
     # one-hot encoding expands "category" into multiple feature columns
     assert len(feature_names) > 3
@@ -112,7 +112,7 @@ def test_handles_mixed_numeric_and_categorical_features():
 def test_drops_rows_with_missing_target_and_reports_the_count():
     df, target_col = _classification_df(n_samples=100)
     df.loc[:9, target_col] = np.nan  # 10 rows with missing target
-    result, _, _, _ = automl.train_and_compare(df, target_col)
+    result, _, _, _, _ = automl.train_and_compare(df, target_col)
     assert result.n_rows_dropped == 10
     assert result.n_rows_used == 90
 
@@ -133,7 +133,7 @@ def test_raises_on_too_few_usable_rows():
 
 def test_shap_importance_returns_ranked_real_features():
     df, target_col = _classification_df(n_samples=300, n_features=6)
-    result, fitted_model, X_test, feature_names = automl.train_and_compare(df, target_col)
+    result, fitted_model, X_test, feature_names, transformer = automl.train_and_compare(df, target_col)
 
     importances, reason = automl.compute_shap_importance(fitted_model, X_test, feature_names)
 
@@ -147,7 +147,7 @@ def test_shap_importance_returns_ranked_real_features():
 
 def test_shap_importance_on_regression_model():
     df, target_col = _regression_df(n_samples=300)
-    result, fitted_model, X_test, feature_names = automl.train_and_compare(df, target_col)
+    result, fitted_model, X_test, feature_names, transformer = automl.train_and_compare(df, target_col)
     importances, reason = automl.compute_shap_importance(fitted_model, X_test, feature_names)
     assert reason is None
     assert len(importances) > 0
@@ -157,7 +157,7 @@ def test_shap_importance_on_regression_model():
 
 def test_explain_results_calls_llm_with_grounded_numbers(monkeypatch):
     df, target_col = _classification_df(n_samples=200)
-    result, _, _, _ = automl.train_and_compare(df, target_col)
+    result, _, _, _, _ = automl.train_and_compare(df, target_col)
 
     captured_prompt = {}
 
