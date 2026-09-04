@@ -15,6 +15,13 @@ def _classification_df(n_samples=200, n_features=5, random_state=0):
     return df, "target"
 
 
+def _regression_df(n_samples=200, n_features=5, random_state=0):
+    X, y = make_regression(n_samples=n_samples, n_features=n_features, noise=5.0, random_state=random_state)
+    df = pd.DataFrame(X, columns=[f"feature_{i}" for i in range(n_features)])
+    df["target"] = y
+    return df, "target"
+
+
 # --- ID-like column exclusion ------------------------------------------
 
 def test_id_like_string_column_is_excluded_from_training():
@@ -199,3 +206,143 @@ def test_predict_handles_a_row_missing_some_feature_columns():
     partial_row = {feature_names[0]: 0.5}  # only the first feature provided
     response = automl.predict_with_model(model_id, "u1", [partial_row])
     assert len(response["predictions"]) == 1
+
+
+# --- Per-prediction SHAP explanation --------------------------------------
+
+def test_explain_single_prediction_returns_signed_impacts_for_tree_model():
+    df, target_col = _classification_df(n_samples=200, n_features=5)
+    result, fitted_model, X_test, feature_names, _ = automl.train_and_compare(df, target_col)
+
+    explanation, reason = automl.explain_single_prediction(fitted_model, X_test[0], feature_names, None)
+
+    assert reason is None
+    assert len(explanation) > 0
+    assert all(f["feature"] in feature_names for f in explanation)
+    # unlike compute_shap_importance, sign is preserved - at least one
+    # value should plausibly be negative across a handful of features
+    # (not a hard guarantee, but exercises the un-abs'd code path)
+    assert all(isinstance(f["impact"], float) for f in explanation)
+
+
+def test_explain_single_prediction_for_linear_model_needs_background_sample():
+    df, target_col = _regression_df(n_samples=200)
+    result, _, X_test, feature_names, _ = automl.train_and_compare(df, target_col)
+
+    # Retrieve/fit the actual Linear Regression model specifically -
+    # train_and_compare only returns the BEST model, and the best one for
+    # this synthetic data might be a tree model, so fit a fresh one here
+    # to exercise the LinearExplainer code path deterministically.
+    from sklearn.linear_model import LinearRegression
+
+    X, y, _, _, _, _, _ = automl._build_feature_matrix(df, target_col, "regression")
+    linear_model = LinearRegression().fit(X[:150], y[:150])
+
+    # Without a background sample, LinearExplainer can't run
+    explanation, reason = automl.explain_single_prediction(linear_model, X[150], feature_names, None)
+    assert explanation == []
+    assert reason is not None
+
+    # With one, it works
+    explanation, reason = automl.explain_single_prediction(linear_model, X[150], feature_names, X[:100])
+    assert reason is None
+    assert len(explanation) > 0
+
+
+def test_predict_with_explain_true_includes_per_row_explanations():
+    df, target_col = _classification_df(n_samples=200, n_features=5)
+    result, fitted_model, X_test, feature_names, transformer = automl.train_and_compare(df, target_col)
+    model_id = automl.register_model(
+        fitted_model,
+        transformer,
+        feature_names,
+        result.problem_type,
+        target_col,
+        user_id="u1",
+        dataset_id="d1",
+        background_sample=X_test[:50],
+    )
+
+    new_rows = df.drop(columns=[target_col]).head(2).to_dict(orient="records")
+    response = automl.predict_with_model(model_id, "u1", new_rows, explain=True)
+
+    assert "explanations" in response
+    assert len(response["explanations"]) == 2
+    assert response["explanations"][0]["explanation"]
+
+
+def test_predict_with_explain_false_by_default_has_no_explanations_key():
+    df, target_col = _classification_df(n_samples=200, n_features=4)
+    result, fitted_model, X_test, feature_names, transformer = automl.train_and_compare(df, target_col)
+    model_id = automl.register_model(
+        fitted_model, transformer, feature_names, result.problem_type, target_col, user_id="u1", dataset_id="d1"
+    )
+
+    new_rows = df.drop(columns=[target_col]).head(1).to_dict(orient="records")
+    response = automl.predict_with_model(model_id, "u1", new_rows)  # explain defaults to False
+
+    assert "explanations" not in response
+
+
+# --- Anomaly detection -------------------------------------------------
+
+def test_detect_anomalies_finds_obviously_injected_outliers():
+    rng = np.random.default_rng(0)
+    normal_points = rng.normal(loc=0, scale=1, size=(190, 3))
+    # 10 points WAY outside the normal cluster - should be unmistakable
+    outliers = rng.normal(loc=50, scale=1, size=(10, 3))
+    data = np.vstack([normal_points, outliers])
+    df = pd.DataFrame(data, columns=["a", "b", "c"])
+
+    result = automl.detect_anomalies(df, contamination=0.05)
+
+    assert result["n_rows_analyzed"] == 200
+    assert result["n_anomalies"] > 0
+    # every one of the 10 obvious outlier row indices (190-199) should be
+    # flagged - this is a real correctness check, not just "did it run"
+    anomaly_indices = {a["row_index"] for a in result["anomalies"]}
+    injected_outlier_indices = set(range(190, 200))
+    assert injected_outlier_indices.issubset(anomaly_indices)
+
+
+def test_detect_anomalies_are_sorted_most_anomalous_first():
+    rng = np.random.default_rng(0)
+    normal_points = rng.normal(loc=0, scale=1, size=(190, 3))
+    outliers = rng.normal(loc=50, scale=1, size=(10, 3))
+    data = np.vstack([normal_points, outliers])
+    df = pd.DataFrame(data, columns=["a", "b", "c"])
+
+    result = automl.detect_anomalies(df, contamination=0.1)
+    scores = [a["anomaly_score"] for a in result["anomalies"]]
+    assert scores == sorted(scores)  # ascending = most negative (most anomalous) first
+
+
+def test_detect_anomalies_respects_feature_columns_selection():
+    rng = np.random.default_rng(0)
+    df = pd.DataFrame({
+        "a": rng.normal(size=50),
+        "b": rng.normal(size=50),
+        "c": rng.normal(size=50),
+    })
+    result = automl.detect_anomalies(df, feature_columns=["a", "b"])
+    assert result["feature_columns"] == ["a", "b"]
+
+
+def test_detect_anomalies_raises_with_too_few_rows():
+    df = pd.DataFrame({"a": range(5)})
+    with pytest.raises(ValueError):
+        automl.detect_anomalies(df)
+
+
+def test_detect_anomalies_raises_with_no_numeric_columns():
+    df = pd.DataFrame({"a": ["x"] * 50, "b": ["y"] * 50})
+    with pytest.raises(ValueError):
+        automl.detect_anomalies(df)
+
+
+def test_detect_anomalies_rejects_invalid_contamination():
+    df = pd.DataFrame({"a": range(50), "b": range(50)})
+    with pytest.raises(ValueError):
+        automl.detect_anomalies(df, contamination=0.6)
+    with pytest.raises(ValueError):
+        automl.detect_anomalies(df, contamination=0)

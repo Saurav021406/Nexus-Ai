@@ -8,6 +8,9 @@
                              trained with (see services/automl.py's
                              FeatureTransformer)
     POST /automl/cluster -> real KMeans clustering with automatic k selection
+    POST /automl/predict/csv -> batch predictions from an uploaded CSV,
+                             downloaded back as a CSV with prediction
+                             (and probability) columns appended
 
 Both /run and /cluster are synchronous, single-request endpoints (same
 pattern as /agent/run) - model training on a typical dataset-studio-sized
@@ -19,9 +22,13 @@ it's just applying an already-fitted pipeline to a handful of new rows.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+import io
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+import pandas as pd
 
 from app.deps import get_current_user
 from app.services import approvals, automl
@@ -42,11 +49,18 @@ class AutoMLRunRequest(BaseModel):
 class AutoMLPredictRequest(BaseModel):
     model_id: str
     rows: list[dict]
+    explain: bool = False  # per-row SHAP breakdown of THIS prediction, not just global importance
 
 
 class AutoMLClusterRequest(BaseModel):
     dataset_id: str
     feature_columns: list[str] | None = None  # None = use all numeric columns
+
+
+class AutoMLAnomalyRequest(BaseModel):
+    dataset_id: str
+    feature_columns: list[str] | None = None  # None = use all numeric columns
+    contamination: float = 0.05  # expected proportion of anomalies
 
 
 def _run_automl(dataset_id: str, user_id: str, target_column: str, problem_type: str | None) -> dict:
@@ -68,7 +82,14 @@ def _run_automl(dataset_id: str, user_id: str, target_column: str, problem_type:
     result.shap_unavailable_reason = shap_unavailable_reason
 
     result.model_id = automl.register_model(
-        fitted_model, transformer, feature_names, result.problem_type, target_column, user_id, dataset_id
+        fitted_model,
+        transformer,
+        feature_names,
+        result.problem_type,
+        target_column,
+        user_id,
+        dataset_id,
+        background_sample=X_test[:100],
     )
 
     business_summary = automl.explain_results(result)
@@ -152,7 +173,7 @@ async def run_automl(payload: AutoMLRunRequest, user=Depends(get_current_user)):
 async def predict_automl(payload: AutoMLPredictRequest, user=Depends(get_current_user)):
     def _run():
         try:
-            return automl.predict_with_model(payload.model_id, user.id, payload.rows)
+            return automl.predict_with_model(payload.model_id, user.id, payload.rows, explain=payload.explain)
         except ValueError as e:
             # Covers both "model not found/expired/not yours" and bad
             # input rows - both are the caller's problem to fix, not a
@@ -163,12 +184,90 @@ async def predict_automl(payload: AutoMLPredictRequest, user=Depends(get_current
     return await run_in_threadpool(_run)
 
 
+MAX_BATCH_PREDICT_ROWS = 5000
+
+
+@router.post("/predict/csv")
+async def predict_automl_csv(
+    model_id: str = Form(...),
+    file: UploadFile = File(...),
+    user=Depends(get_current_user),
+):
+    """Batch prediction: upload a CSV of new rows, get back the SAME CSV
+    with a `prediction` column (and `probability_<class>` columns for
+    classification) appended - much more practical than the single-row
+    form for anyone who actually has a batch of new records to score."""
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Only CSV files are supported for batch prediction.")
+
+    raw_bytes = await file.read()
+    if len(raw_bytes) == 0:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    def _run() -> tuple[str, bytes]:
+        try:
+            input_df = pd.read_csv(io.BytesIO(raw_bytes))
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Could not read this CSV: {e}")
+
+        if len(input_df) == 0:
+            raise HTTPException(status_code=400, detail="This CSV has no rows to predict on.")
+        if len(input_df) > MAX_BATCH_PREDICT_ROWS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"This CSV has {len(input_df)} rows - batch prediction is limited to "
+                    f"{MAX_BATCH_PREDICT_ROWS} rows at a time."
+                ),
+            )
+
+        try:
+            prediction_response = automl.predict_with_model(
+                model_id, user.id, input_df.to_dict(orient="records")
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        output_df = input_df.copy()
+        output_df["prediction"] = prediction_response["predictions"]
+        if "probabilities" in prediction_response:
+            prob_df = pd.DataFrame(prediction_response["probabilities"]).reset_index(drop=True)
+            prob_df.columns = [f"probability_{c}" for c in prob_df.columns]
+            output_df = pd.concat([output_df.reset_index(drop=True), prob_df], axis=1)
+
+        csv_bytes = output_df.to_csv(index=False).encode("utf-8")
+        base_name = file.filename.rsplit(".", 1)[0] if file.filename else "predictions"
+        return f"{base_name}_predictions.csv", csv_bytes
+
+    download_filename, csv_bytes = await run_in_threadpool(_run)
+
+    return StreamingResponse(
+        io.BytesIO(csv_bytes),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{download_filename}"'},
+    )
+
+
 @router.post("/cluster")
 async def run_clustering(payload: AutoMLClusterRequest, user=Depends(get_current_user)):
     def _run():
         dataframe = get_dataset_dataframe(payload.dataset_id, user.id)
         try:
             return automl.cluster_dataset(dataframe, feature_columns=payload.feature_columns)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    return await run_in_threadpool(_run)
+
+
+@router.post("/anomalies")
+async def run_anomaly_detection(payload: AutoMLAnomalyRequest, user=Depends(get_current_user)):
+    def _run():
+        dataframe = get_dataset_dataframe(payload.dataset_id, user.id)
+        try:
+            return automl.detect_anomalies(
+                dataframe, feature_columns=payload.feature_columns, contamination=payload.contamination
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 

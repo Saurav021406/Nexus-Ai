@@ -282,6 +282,7 @@ interface AutoMLPredictResponse {
   model_id: string
   n_rows: number
   probabilities?: Record<string, number>[]
+  explanations?: PredictionExplanation[]
 }
 
 interface AutoMLClusterResult {
@@ -290,6 +291,31 @@ interface AutoMLClusterResult {
   cluster_sizes: Record<string, number>
   cluster_profiles: Record<string, Record<string, number>>
   feature_columns: string[]
+}
+
+interface AnomalyRecord {
+  row_index: number
+  anomaly_score: number
+  values: Record<string, number>
+}
+
+interface AnomalyResult {
+  n_rows_analyzed: number
+  n_anomalies: number
+  anomaly_rate: number
+  feature_columns: string[]
+  anomalies: AnomalyRecord[]
+  anomalies_truncated: boolean
+}
+
+interface PredictionExplanationItem {
+  feature: string
+  impact: number
+}
+
+interface PredictionExplanation {
+  explanation: PredictionExplanationItem[]
+  unavailable_reason: string | null
 }
 
 interface ForecastColumnsInfo {
@@ -613,15 +639,24 @@ export default function UploadDataset({
   const [automlRunning, setAutomlRunning] = useState(false)
   const [automlError, setAutomlError] = useState<string | null>(null)
   const [automlResult, setAutomlResult] = useState<AutoMLResult | null>(null)
-  const [automlMode, setAutomlMode] = useState<'train' | 'cluster'>('train')
+  const [automlMode, setAutomlMode] = useState<'train' | 'cluster' | 'anomaly'>('train')
   const [automlPredictInputs, setAutomlPredictInputs] = useState<Record<string, string>>({})
   const [automlPredicting, setAutomlPredicting] = useState(false)
   const [automlPredictError, setAutomlPredictError] = useState<string | null>(null)
   const [automlPredictResult, setAutomlPredictResult] = useState<AutoMLPredictResponse | null>(null)
+  const [automlExplainPrediction, setAutomlExplainPrediction] = useState(false)
+  const [batchPredictFile, setBatchPredictFile] = useState<File | null>(null)
+  const [batchPredicting, setBatchPredicting] = useState(false)
+  const [batchPredictError, setBatchPredictError] = useState<string | null>(null)
   const [clusterFeatureColumns, setClusterFeatureColumns] = useState<string[]>([])
   const [clustering, setClustering] = useState(false)
   const [clusterError, setClusterError] = useState<string | null>(null)
   const [clusterResult, setClusterResult] = useState<AutoMLClusterResult | null>(null)
+  const [anomalyFeatureColumns, setAnomalyFeatureColumns] = useState<string[]>([])
+  const [anomalyContamination, setAnomalyContamination] = useState(0.05)
+  const [detectingAnomalies, setDetectingAnomalies] = useState(false)
+  const [anomalyError, setAnomalyError] = useState<string | null>(null)
+  const [anomalyResult, setAnomalyResult] = useState<AnomalyResult | null>(null)
   const [automlVersions, setAutomlVersions] = useState<AutoMLVersion[]>([])
   const [automlVersionsLoading, setAutomlVersionsLoading] = useState(false)
   const [automlVersionsError, setAutomlVersionsError] = useState<string | null>(null)
@@ -1324,7 +1359,7 @@ export default function UploadDataset({
       const response = await fetch(`${API_BASE_URL}/automl/predict`, {
         method: 'POST',
         headers: { ...headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model_id: automlResult.model_id, rows: [row] }),
+        body: JSON.stringify({ model_id: automlResult.model_id, rows: [row], explain: automlExplainPrediction }),
       })
       if (!response.ok) {
         const errBody = await response.json().catch(() => ({}))
@@ -1335,6 +1370,74 @@ export default function UploadDataset({
       setAutomlPredictError((err as Error).message)
     } finally {
       setAutomlPredicting(false)
+    }
+  }
+
+  async function handleBatchPredict() {
+    if (!automlResult?.model_id || !batchPredictFile) return
+    setBatchPredicting(true)
+    setBatchPredictError(null)
+
+    try {
+      const headers = await authHeader()
+      const formData = new FormData()
+      formData.append('model_id', automlResult.model_id)
+      formData.append('file', batchPredictFile)
+
+      const response = await fetch(`${API_BASE_URL}/automl/predict/csv`, {
+        method: 'POST',
+        headers, // no Content-Type here - the browser sets the correct multipart boundary for FormData
+        body: formData,
+      })
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Batch prediction failed (${response.status})`)
+      }
+
+      const blob = await response.blob()
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      const disposition = response.headers.get('content-disposition') || ''
+      const match = disposition.match(/filename="(.+)"/)
+      a.download = match ? match[1] : 'predictions.csv'
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      window.URL.revokeObjectURL(url)
+    } catch (err) {
+      setBatchPredictError((err as Error).message)
+    } finally {
+      setBatchPredicting(false)
+    }
+  }
+
+  async function handleDetectAnomalies() {
+    if (!result) return
+    setDetectingAnomalies(true)
+    setAnomalyError(null)
+    setAnomalyResult(null)
+
+    try {
+      const headers = await authHeader()
+      const response = await fetch(`${API_BASE_URL}/automl/anomalies`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataset_id: result.dataset_id,
+          feature_columns: anomalyFeatureColumns.length > 0 ? anomalyFeatureColumns : null,
+          contamination: anomalyContamination,
+        }),
+      })
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Anomaly detection failed (${response.status})`)
+      }
+      setAnomalyResult(await response.json())
+    } catch (err) {
+      setAnomalyError((err as Error).message)
+    } finally {
+      setDetectingAnomalies(false)
     }
   }
 
@@ -2901,6 +3004,14 @@ export default function UploadDataset({
             >
               Clustering (find groups)
             </button>
+            <button
+              onClick={() => setAutomlMode('anomaly')}
+              className={`rounded-lg px-3 py-1.5 text-sm font-medium ${
+                automlMode === 'anomaly' ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+              }`}
+            >
+              Anomaly detection
+            </button>
           </div>
 
           {automlMode === 'train' && (
@@ -3077,6 +3188,15 @@ export default function UploadDataset({
                       </div>
                     ))}
                   </div>
+                  <label className="flex items-center gap-2 text-xs text-slate-400">
+                    <input
+                      type="checkbox"
+                      checked={automlExplainPrediction}
+                      onChange={(e) => setAutomlExplainPrediction(e.target.checked)}
+                      className="rounded border-slate-600"
+                    />
+                    Explain this prediction (which features pushed it up or down)
+                  </label>
                   <button
                     onClick={handleAutoMLPredict}
                     disabled={automlPredicting}
@@ -3101,8 +3221,57 @@ export default function UploadDataset({
                           ))}
                         </ul>
                       )}
+                      {automlPredictResult.explanations && automlPredictResult.explanations[0] && (
+                        <div className="mt-2 border-t border-emerald-800/50 pt-2">
+                          {automlPredictResult.explanations[0].unavailable_reason ? (
+                            <p className="text-xs text-slate-500">
+                              {automlPredictResult.explanations[0].unavailable_reason}
+                            </p>
+                          ) : (
+                            <>
+                              <p className="mb-1 text-xs font-medium text-emerald-200">
+                                Why this prediction:
+                              </p>
+                              <div className="space-y-1">
+                                {automlPredictResult.explanations[0].explanation.map((f) => (
+                                  <div key={f.feature} className="flex items-center gap-2 text-xs">
+                                    <span className="w-32 truncate text-slate-400">{f.feature}</span>
+                                    <span className={f.impact >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                                      {f.impact >= 0 ? '▲' : '▼'} {Math.abs(f.impact).toFixed(4)}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
+                </div>
+              )}
+
+              {automlResult.model_id && (
+                <div className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-3">
+                  <h4 className="text-sm font-medium text-slate-300">Batch predict from a CSV</h4>
+                  <p className="text-xs text-slate-500">
+                    Upload a CSV of new rows - get the same file back with a `prediction` column
+                    (and probabilities, for classification) appended.
+                  </p>
+                  <input
+                    type="file"
+                    accept=".csv"
+                    onChange={(e) => setBatchPredictFile(e.target.files?.[0] ?? null)}
+                    className="block w-full text-xs text-slate-400 file:mr-3 file:rounded-lg file:border-0 file:bg-slate-800 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-200 hover:file:bg-slate-700"
+                  />
+                  <button
+                    onClick={handleBatchPredict}
+                    disabled={batchPredicting || !batchPredictFile}
+                    className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+                  >
+                    {batchPredicting ? 'Predicting...' : 'Predict & download CSV'}
+                  </button>
+                  {batchPredictError && <ErrorBanner message={batchPredictError} />}
                 </div>
               )}
             </div>
@@ -3192,6 +3361,114 @@ export default function UploadDataset({
                   </tbody>
                 </table>
               </div>
+            </div>
+          )}
+          </>
+          )}
+
+          {automlMode === 'anomaly' && (
+          <>
+          <div className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-3">
+            <p className="text-sm text-slate-400">
+              Flags unusual/outlier rows with IsolationForest - a sibling to Clustering, but
+              finds the rows that DON'T fit any group well instead of grouping similar rows
+              together. No target column needed.
+            </p>
+            <div className="flex flex-col gap-2">
+              <label className="text-sm text-slate-400">
+                Feature columns (leave all unchecked to use every numeric column):
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {(result.columns ?? [])
+                  .filter((col) => col.dtype.toLowerCase().includes('int') || col.dtype.toLowerCase().includes('float'))
+                  .map((col) => {
+                    const checked = anomalyFeatureColumns.includes(col.name)
+                    return (
+                      <button
+                        key={col.name}
+                        type="button"
+                        onClick={() =>
+                          setAnomalyFeatureColumns((prev) =>
+                            checked ? prev.filter((c) => c !== col.name) : [...prev, col.name]
+                          )
+                        }
+                        className={`rounded-full px-3 py-1 text-xs font-medium ${
+                          checked ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                        }`}
+                      >
+                        {col.name}
+                      </button>
+                    )
+                  })}
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <label className="text-sm text-slate-400">
+                Expected anomaly rate: {Math.round(anomalyContamination * 100)}%
+              </label>
+              <input
+                type="range"
+                min={1}
+                max={30}
+                value={Math.round(anomalyContamination * 100)}
+                onChange={(e) => setAnomalyContamination(Number(e.target.value) / 100)}
+                className="w-40"
+              />
+            </div>
+            <button
+              onClick={handleDetectAnomalies}
+              disabled={detectingAnomalies}
+              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+            >
+              {detectingAnomalies ? 'Detecting...' : 'Detect anomalies'}
+            </button>
+          </div>
+
+          {anomalyError && <ErrorBanner message={anomalyError} />}
+
+          {anomalyResult && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+                <Stat label="Rows analyzed" value={anomalyResult.n_rows_analyzed} />
+                <Stat label="Anomalies found" value={anomalyResult.n_anomalies} />
+                <Stat label="Anomaly rate" value={`${Math.round(anomalyResult.anomaly_rate * 100)}%`} isText />
+              </div>
+
+              {anomalyResult.anomalies.length > 0 && (
+                <div className="rounded-xl border border-slate-800 overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-900 text-slate-400">
+                      <tr>
+                        <th className="text-left p-2">Row</th>
+                        <th className="text-left p-2">Anomaly score</th>
+                        {anomalyResult.feature_columns.map((col) => (
+                          <th key={col} className="text-left p-2">
+                            {col}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {anomalyResult.anomalies.map((a) => (
+                        <tr key={a.row_index} className="border-t border-slate-800">
+                          <td className="p-2 font-medium text-slate-200">{a.row_index}</td>
+                          <td className="p-2 text-amber-400">{a.anomaly_score}</td>
+                          {anomalyResult.feature_columns.map((col) => (
+                            <td key={col} className="p-2 text-slate-400">
+                              {a.values[col]}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {anomalyResult.anomalies_truncated && (
+                    <p className="p-2 text-xs text-slate-500">
+                      Showing the {anomalyResult.anomalies.length} most anomalous rows.
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
           )}
           </>

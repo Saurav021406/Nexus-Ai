@@ -569,6 +569,60 @@ def _evict_expired_models_locked() -> None:
         del _model_registry[model_id]
 
 
+def explain_single_prediction(
+    model: Any,
+    X_row: np.ndarray,
+    feature_names: list[str],
+    background_sample: np.ndarray | None,
+    max_features: int = TOP_N_SHAP_FEATURES,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Real, per-instance SHAP values for ONE specific prediction - not
+    global importance ("age matters most overall") but this exact row's
+    breakdown ("age pushed THIS prediction up by 0.12, income pushed it
+    down by 0.05"). SIGN is kept here (unlike compute_shap_importance's
+    abs()), since "why did the model predict this" genuinely depends on
+    direction, not just magnitude. Falls back gracefully (empty list +
+    reason), same philosophy as compute_shap_importance."""
+    if not _HAS_SHAP:
+        return [], "SHAP is not installed in this environment."
+
+    try:
+        model_type = type(model).__name__
+        row_2d = X_row.reshape(1, -1)
+
+        if any(name in model_type for name in ("RandomForest", "XGB", "LGBM")):
+            explainer = shap.TreeExplainer(model)
+            shap_values = explainer.shap_values(row_2d)
+        else:
+            if background_sample is None or len(background_sample) == 0:
+                return [], "No background data available to explain this linear model's prediction."
+            explainer = shap.LinearExplainer(model, background_sample)
+            shap_values = explainer.shap_values(row_2d)
+
+        # Same shape variation as compute_shap_importance (list / 3D / 2D)
+        # - for multi-class, explain the class the model actually predicted
+        # (highest probability), since that's the prediction being shown.
+        class_index = 0
+        if hasattr(model, "predict_proba"):
+            probs = model.predict_proba(row_2d)[0]
+            class_index = int(np.argmax(probs))
+
+        if isinstance(shap_values, list):
+            row_values = shap_values[class_index][0]
+        elif shap_values.ndim == 3:
+            row_values = shap_values[0, :, class_index]
+        else:
+            row_values = shap_values[0]
+
+        ranked = sorted(zip(feature_names, row_values), key=lambda pair: abs(pair[1]), reverse=True)
+        return (
+            [{"feature": name, "impact": round(float(value), 6)} for name, value in ranked[:max_features]],
+            None,
+        )
+    except Exception as e:
+        return [], f"SHAP computation failed for this prediction: {e}"
+
+
 def register_model(
     model: Any,
     transformer: FeatureTransformer,
@@ -577,12 +631,20 @@ def register_model(
     target_column: str,
     user_id: str,
     dataset_id: str,
+    background_sample: np.ndarray | None = None,
     ttl_seconds: int = MODEL_REGISTRY_TTL_SECONDS,
 ) -> str:
     """Persists a freshly-trained model + its exact preprocessing so
     predict_with_model() can use it later on new rows, without retraining.
     In-memory only (see MODEL_REGISTRY_TTL_SECONDS above for the trade-off
-    this accepts) - a server restart clears it, same as services/cache.py."""
+    this accepts) - a server restart clears it, same as services/cache.py.
+
+    background_sample (a small slice of the held-out test set, already
+    transformed) is stored purely so explain_single_prediction() can use
+    shap.LinearExplainer() for non-tree models later - TreeExplainer
+    doesn't need it, but LinearExplainer does, and re-deriving it from the
+    original dataframe at predict time would mean keeping that around too.
+    """
     model_id = str(uuid.uuid4())
     with _model_registry_lock:
         _evict_expired_models_locked()
@@ -594,6 +656,7 @@ def register_model(
             "target_column": target_column,
             "user_id": user_id,
             "dataset_id": dataset_id,
+            "background_sample": background_sample,
             "expires_at": time.time() + ttl_seconds,
         }
     return model_id
@@ -612,12 +675,18 @@ def _get_owned_model(model_id: str, user_id: str) -> dict[str, Any] | None:
         return entry
 
 
-def predict_with_model(model_id: str, user_id: str, rows: list[dict]) -> dict:
+def predict_with_model(model_id: str, user_id: str, rows: list[dict], explain: bool = False) -> dict:
     """Applies the EXACT preprocessing fitted during training (same
     imputer medians, same scaler mean/std, same one-hot categories) to
     brand new rows, then predicts with the model that was actually chosen
     as best - this is what makes AutoML a usable model rather than a
-    one-time report."""
+    one-time report.
+
+    explain=True adds a per-row "explanations" list (real, signed SHAP
+    values for that specific row) alongside the predictions - off by
+    default since it's extra computation not every caller needs (e.g. a
+    large batch CSV prediction may want raw speed over per-row detail).
+    """
     entry = _get_owned_model(model_id, user_id)
     if entry is None:
         raise ValueError(
@@ -632,6 +701,7 @@ def predict_with_model(model_id: str, user_id: str, rows: list[dict]) -> dict:
     input_df = pd.DataFrame(rows)
     transformer: FeatureTransformer = entry["transformer"]
     model = entry["model"]
+    feature_names = entry["feature_names"]
 
     X = transformer.transform(input_df)
     raw_predictions = model.predict(X)
@@ -647,6 +717,14 @@ def predict_with_model(model_id: str, user_id: str, rows: list[dict]) -> dict:
             else [str(c) for c in model.classes_]
         )
         response["probabilities"] = [dict(zip(classes, row.tolist())) for row in probabilities]
+
+    if explain:
+        background_sample = entry.get("background_sample")
+        explanations = []
+        for i in range(len(rows)):
+            row_explanation, reason = explain_single_prediction(model, X[i], feature_names, background_sample)
+            explanations.append({"explanation": row_explanation, "unavailable_reason": reason})
+        response["explanations"] = explanations
 
     return response
 
@@ -741,4 +819,59 @@ def cluster_dataset(df: pd.DataFrame, feature_columns: list[str] | None = None, 
         "cluster_sizes": cluster_sizes.to_dict(),
         "cluster_profiles": cluster_profiles.to_dict(orient="index"),
         "feature_columns": list(numeric_df.columns),
+    }
+
+
+MAX_ANOMALIES_RETURNED = 100
+
+
+def detect_anomalies(df: pd.DataFrame, feature_columns: list[str] | None = None, contamination: float = 0.05) -> dict:
+    """Flags unusual/outlier rows using IsolationForest - a natural sibling
+    to cluster_dataset() above: same shape (no target column, no train/
+    test split), but instead of grouping similar rows together, this finds
+    the rows that DON'T fit any group well.
+
+    contamination is IsolationForest's own parameter for the expected
+    proportion of anomalies (default 5%) - a prior the algorithm uses to
+    decide where to draw the line, not a hard guarantee on the count
+    returned.
+    """
+    from sklearn.ensemble import IsolationForest
+
+    numeric_df = df[feature_columns] if feature_columns else df.select_dtypes(include="number")
+    numeric_df = numeric_df.dropna()
+    if numeric_df.shape[1] < 1:
+        raise ValueError("Need at least 1 numeric column with no missing values to detect anomalies on.")
+    if len(numeric_df) < 20:
+        raise ValueError(f"Only {len(numeric_df)} usable rows - too few to detect anomalies reliably (need at least 20).")
+    if not 0 < contamination < 0.5:
+        raise ValueError("contamination must be between 0 and 0.5.")
+
+    X = StandardScaler().fit_transform(numeric_df)
+
+    model = IsolationForest(contamination=contamination, random_state=RANDOM_STATE, n_estimators=200)
+    labels = model.fit_predict(X)  # -1 = anomaly, 1 = normal
+    scores = model.decision_function(X)  # lower (more negative) = more anomalous
+
+    anomaly_mask = labels == -1
+
+    anomalies = []
+    for idx, score in zip(numeric_df.index[anomaly_mask], scores[anomaly_mask]):
+        anomalies.append(
+            {
+                "row_index": int(idx),
+                "anomaly_score": round(float(score), 4),
+                "values": {k: round(float(v), 4) for k, v in numeric_df.loc[idx].to_dict().items()},
+            }
+        )
+    anomalies.sort(key=lambda a: a["anomaly_score"])  # most anomalous (most negative) first
+
+    n_anomalies = int(anomaly_mask.sum())
+    return {
+        "n_rows_analyzed": len(numeric_df),
+        "n_anomalies": n_anomalies,
+        "anomaly_rate": round(n_anomalies / len(numeric_df), 4),
+        "feature_columns": list(numeric_df.columns),
+        "anomalies": anomalies[:MAX_ANOMALIES_RETURNED],
+        "anomalies_truncated": n_anomalies > MAX_ANOMALIES_RETURNED,
     }
