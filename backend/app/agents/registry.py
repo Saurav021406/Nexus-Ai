@@ -115,12 +115,18 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
     "ML Engineer": AgentDefinition(
         name="ML Engineer",
         description=(
-            "Assesses modeling/forecasting readiness and recommends an approach. "
-            "Does not train models - orchestration-layer reasoning only (Phase 4 scope)."
+            "Trains and compares real models (Logistic/Linear Regression, Random Forest, "
+            "XGBoost, LightGBM) for classification or regression tasks, picks the best by "
+            "cross-validated performance, and explains it with real SHAP values - genuine "
+            "training, not readiness assessment. Use for requests like 'predict X' or "
+            "'what drives Y'."
         ),
         fn=ml_engineer.analyze,
-        capabilities=["modeling_readiness_assessment", "target_variable_identification"],
+        capabilities=["automl_training", "model_comparison", "shap_explainability"],
         tools=["get_statistics", "load_dataset_sample"],
+        input_schema="full WorkflowState (needs the real dataframe, not just data_summary)",
+        output_schema="{summary, key_metrics, recommendation, problem_type, target_column, best_model_name, model_id, models, shap_importances, warnings}",
+        needs_full_access=True,
     ),
     "Business Analyst": AgentDefinition(
         name="Business Analyst",

@@ -30,6 +30,16 @@ def test_sql_agent_needs_full_workflow_access():
     assert definition.needs_full_access is True
 
 
+def test_ml_engineer_needs_full_workflow_access():
+    # ML Engineer now trains real models (services/automl.py) instead of
+    # only reasoning over data_summary text - it needs the actual
+    # dataframe, same reason SQL needs full access above.
+    definition = get_agent_definition("ML Engineer")
+    assert definition is not None
+    assert definition.needs_full_access is True
+    assert definition.fn is not None
+
+
 def test_reasoning_only_agents_do_not_need_full_access():
     for name in ["Finance", "Education", "Data Scientist", "Business Analyst"]:
         definition = get_agent_definition(name)
