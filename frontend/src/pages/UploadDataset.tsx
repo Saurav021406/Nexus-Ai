@@ -228,6 +228,9 @@ interface AutoMLModelResult {
   cv_score_std: number
   cv_metric: string
   test_metrics: Record<string, number | string>
+  train_score: number | null
+  fit_diagnosis: 'overfitting' | 'underfitting' | 'good_fit' | null
+  tuned_params: Record<string, number> | null
 }
 
 interface AutoMLShapFeature {
@@ -256,6 +259,7 @@ interface AutoMLResult {
   primary_metric: string
   best_model_name: string
   model_id: string | null
+  tuning_enabled: boolean
   models: AutoMLModelResult[]
   shap_importances: AutoMLShapFeature[]
   shap_unavailable_reason: string | null
@@ -636,6 +640,7 @@ export default function UploadDataset({
   const [forecastColumnsError, setForecastColumnsError] = useState<string | null>(null)
   const [automlTargetColumn, setAutomlTargetColumn] = useState('')
   const [automlProblemType, setAutomlProblemType] = useState<'auto' | 'classification' | 'regression'>('auto')
+  const [automlTuneHyperparameters, setAutomlTuneHyperparameters] = useState(false)
   const [automlRunning, setAutomlRunning] = useState(false)
   const [automlError, setAutomlError] = useState<string | null>(null)
   const [automlResult, setAutomlResult] = useState<AutoMLResult | null>(null)
@@ -1298,6 +1303,7 @@ export default function UploadDataset({
           dataset_id: result.dataset_id,
           target_column: automlTargetColumn,
           problem_type: automlProblemType === 'auto' ? null : automlProblemType,
+          tune_hyperparameters: automlTuneHyperparameters,
         }),
       })
       if (!response.ok) {
@@ -3043,6 +3049,16 @@ export default function UploadDataset({
                 <option value="regression">Regression</option>
               </select>
 
+              <label className="flex items-center gap-2 text-sm text-slate-400">
+                <input
+                  type="checkbox"
+                  checked={automlTuneHyperparameters}
+                  onChange={(e) => setAutomlTuneHyperparameters(e.target.checked)}
+                  className="rounded border-slate-600"
+                />
+                Tune hyperparameters (slower, searches for better settings)
+              </label>
+
               <button
                 onClick={handleRunAutoML}
                 disabled={automlRunning || !automlTargetColumn}
@@ -3085,6 +3101,7 @@ export default function UploadDataset({
                         CV {automlResult.primary_metric} (mean ± std)
                       </th>
                       <th className="text-left p-2">Test metrics</th>
+                      <th className="text-left p-2">Fit</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -3102,6 +3119,14 @@ export default function UploadDataset({
                               Best
                             </span>
                           )}
+                          {m.tuned_params && (
+                            <span
+                              className="ml-2 rounded-full bg-slate-700 px-2 py-0.5 text-xs text-slate-200"
+                              title={Object.entries(m.tuned_params).map(([k, v]) => `${k}=${v}`).join(', ')}
+                            >
+                              Tuned
+                            </span>
+                          )}
                         </td>
                         <td className="p-2 text-slate-300">
                           {Number.isFinite(m.cv_score_mean) ? `${m.cv_score_mean} ± ${m.cv_score_std}` : '—'}
@@ -3112,6 +3137,24 @@ export default function UploadDataset({
                             : Object.entries(m.test_metrics)
                                 .map(([k, v]) => `${k}: ${v}`)
                                 .join(' · ')}
+                        </td>
+                        <td className="p-2">
+                          {m.fit_diagnosis === 'overfitting' && (
+                            <span className="text-amber-400" title={`Train score: ${m.train_score}`}>
+                              Overfitting
+                            </span>
+                          )}
+                          {m.fit_diagnosis === 'underfitting' && (
+                            <span className="text-red-400" title={`Train score: ${m.train_score}`}>
+                              Underfitting
+                            </span>
+                          )}
+                          {m.fit_diagnosis === 'good_fit' && (
+                            <span className="text-emerald-400" title={`Train score: ${m.train_score}`}>
+                              Good fit
+                            </span>
+                          )}
+                          {!m.fit_diagnosis && <span className="text-slate-600">—</span>}
                         </td>
                       </tr>
                     ))}

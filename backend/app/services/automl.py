@@ -83,6 +83,13 @@ try:
 except ImportError:
     _HAS_SHAP = False
 
+try:
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)  # its default per-trial logging is far too noisy for a server process
+    _HAS_OPTUNA = True
+except ImportError:
+    _HAS_OPTUNA = False
+
 # A numeric column with this few distinct values is almost always encoding
 # categories (e.g. star ratings 1-5, a 0/1 flag) rather than a continuous
 # quantity - classification fits it far better than regression.
@@ -118,6 +125,25 @@ CLASS_IMBALANCE_RATIO_THRESHOLD = 3.0
 # bounded if predict() is never called to clean things up itself.
 MODEL_REGISTRY_TTL_SECONDS = 3600
 
+# Hyperparameter tuning (opt-in - see train_and_compare's tune_hyperparameters
+# param): kept deliberately small (few trials, fewer CV folds than the
+# final comparison) since this runs inside a single synchronous HTTP
+# request - a large search would make AutoML runs take minutes instead of
+# seconds. This is a speed/quality trade-off the caller opts into, not a
+# forced default.
+DEFAULT_TUNING_TRIALS = 15
+TUNING_CV_FOLDS = 3
+
+# Overfitting: the model fits the training data far better than it
+# generalizes to the held-out test set - a large train/test gap is the
+# classic signature. Underfitting: the model can't even fit the training
+# data well - a low training score on its own (regardless of the gap)
+# means the model is too weak or the signal too complex for it, not that
+# it's "generalizing well by not overfitting."
+OVERFIT_GAP_THRESHOLD = 0.15
+UNDERFIT_SCORE_THRESHOLD_CLASSIFICATION = 0.55  # accuracy - meaningfully better than a coin flip on binary
+UNDERFIT_SCORE_THRESHOLD_REGRESSION = 0.3  # R^2 - meaningfully better than predicting the mean
+
 
 @dataclass
 class ModelResult:
@@ -126,6 +152,9 @@ class ModelResult:
     cv_score_std: float
     cv_metric: str
     test_metrics: dict[str, float]
+    train_score: float | None = None
+    fit_diagnosis: str | None = None  # "overfitting" | "underfitting" | "good_fit" | None (on failure)
+    tuned_params: dict[str, Any] | None = None  # None = default hyperparameters were used, not tuned
 
 
 @dataclass
@@ -335,36 +364,161 @@ def _build_feature_matrix(
     return X, y, feature_names, transformer, excluded_id_columns, leakage_warnings, class_imbalance
 
 
-def _candidate_models(problem_type: str, y_train: pd.Series | None = None, imbalanced: bool = False) -> dict[str, Any]:
+def _candidate_model_names(problem_type: str) -> list[str]:
     if problem_type == "classification":
-        class_weight = "balanced" if imbalanced else None
-        models = {
-            "Logistic Regression": LogisticRegression(max_iter=1000, random_state=RANDOM_STATE, class_weight=class_weight),
-            "Random Forest": RandomForestClassifier(n_estimators=200, random_state=RANDOM_STATE, class_weight=class_weight),
-        }
-        if _HAS_XGBOOST:
+        names = ["Logistic Regression", "Random Forest"]
+    else:
+        names = ["Linear Regression", "Random Forest"]
+    if _HAS_XGBOOST:
+        names.append("XGBoost")
+    if _HAS_LIGHTGBM:
+        names.append("LightGBM")
+    return names
+
+
+def _build_model(
+    name: str,
+    problem_type: str,
+    y_train: pd.Series | None = None,
+    imbalanced: bool = False,
+    extra_params: dict[str, Any] | None = None,
+) -> Any:
+    """Constructs one model instance by name. Shared by _candidate_models()
+    (default hyperparameters) and _tune_hyperparameters() (Optuna-searched
+    ones) so class_weight/scale_pos_weight imbalance handling only lives
+    in one place - extra_params always wins over the defaults below via
+    dict.update(), never the reverse, so a tuned value is never silently
+    discarded."""
+    extra_params = extra_params or {}
+    class_weight = "balanced" if imbalanced else None
+
+    if problem_type == "classification":
+        if name == "Logistic Regression":
+            params = {"max_iter": 1000, "random_state": RANDOM_STATE, "class_weight": class_weight}
+            params.update(extra_params)
+            return LogisticRegression(**params)
+        if name == "Random Forest":
+            params = {"n_estimators": 200, "random_state": RANDOM_STATE, "class_weight": class_weight}
+            params.update(extra_params)
+            return RandomForestClassifier(**params)
+        if name == "XGBoost":
             # XGBoost has no class_weight param - scale_pos_weight is its
             # equivalent, but only applies to strictly BINARY classification.
             # Multiclass imbalance is still flagged in the result's warnings,
             # just not auto-corrected for this particular model.
-            xgb_kwargs: dict[str, Any] = dict(n_estimators=200, eval_metric="logloss", random_state=RANDOM_STATE, verbosity=0)
+            params: dict[str, Any] = {"n_estimators": 200, "eval_metric": "logloss", "random_state": RANDOM_STATE, "verbosity": 0}
             if imbalanced and y_train is not None and y_train.nunique() == 2:
                 counts = y_train.value_counts()
-                xgb_kwargs["scale_pos_weight"] = float(counts.max() / counts.min())
-            models["XGBoost"] = XGBClassifier(**xgb_kwargs)
-        if _HAS_LIGHTGBM:
-            models["LightGBM"] = LGBMClassifier(n_estimators=200, random_state=RANDOM_STATE, verbose=-1, class_weight=class_weight)
-        return models
+                params["scale_pos_weight"] = float(counts.max() / counts.min())
+            params.update(extra_params)
+            return XGBClassifier(**params)
+        if name == "LightGBM":
+            params = {"n_estimators": 200, "random_state": RANDOM_STATE, "verbose": -1, "class_weight": class_weight}
+            params.update(extra_params)
+            return LGBMClassifier(**params)
+    else:
+        if name == "Linear Regression":
+            return LinearRegression(**extra_params)
+        if name == "Random Forest":
+            params = {"n_estimators": 200, "random_state": RANDOM_STATE}
+            params.update(extra_params)
+            return RandomForestRegressor(**params)
+        if name == "XGBoost":
+            params = {"n_estimators": 200, "random_state": RANDOM_STATE, "verbosity": 0}
+            params.update(extra_params)
+            return XGBRegressor(**params)
+        if name == "LightGBM":
+            params = {"n_estimators": 200, "random_state": RANDOM_STATE, "verbose": -1}
+            params.update(extra_params)
+            return LGBMRegressor(**params)
 
-    models = {
-        "Linear Regression": LinearRegression(),
-        "Random Forest": RandomForestRegressor(n_estimators=200, random_state=RANDOM_STATE),
+    raise ValueError(f"Unknown model '{name}' for problem_type '{problem_type}'")
+
+
+def _candidate_models(problem_type: str, y_train: pd.Series | None = None, imbalanced: bool = False) -> dict[str, Any]:
+    return {
+        name: _build_model(name, problem_type, y_train, imbalanced)
+        for name in _candidate_model_names(problem_type)
     }
-    if _HAS_XGBOOST:
-        models["XGBoost"] = XGBRegressor(n_estimators=200, random_state=RANDOM_STATE, verbosity=0)
-    if _HAS_LIGHTGBM:
-        models["LightGBM"] = LGBMRegressor(n_estimators=200, random_state=RANDOM_STATE, verbose=-1)
-    return models
+
+
+def _suggest_hyperparams(trial: Any, name: str) -> dict[str, Any]:
+    """Small, sensible search space per model type - not exhaustive, just
+    enough to meaningfully beat the fixed defaults without turning a
+    15-trial search into an all-day sweep. Linear Regression has nothing
+    worth tuning (no regularization strength, no depth, no learning
+    rate), so it's deliberately absent - _tune_hyperparameters() returns
+    {} for it immediately without ever calling this."""
+    if name == "Logistic Regression":
+        return {"C": trial.suggest_float("C", 1e-3, 1e2, log=True)}
+    if name == "Random Forest":
+        return {
+            "n_estimators": trial.suggest_int("n_estimators", 50, 300),
+            "max_depth": trial.suggest_int("max_depth", 3, 20),
+            "min_samples_split": trial.suggest_int("min_samples_split", 2, 10),
+        }
+    if name == "XGBoost":
+        return {
+            "n_estimators": trial.suggest_int("n_estimators", 50, 300),
+            "max_depth": trial.suggest_int("max_depth", 2, 10),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+        }
+    if name == "LightGBM":
+        return {
+            "n_estimators": trial.suggest_int("n_estimators", 50, 300),
+            "max_depth": trial.suggest_int("max_depth", 2, 10),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+            "num_leaves": trial.suggest_int("num_leaves", 15, 100),
+        }
+    return {}
+
+
+def _tune_hyperparameters(
+    name: str,
+    problem_type: str,
+    X_train: np.ndarray,
+    y_train: pd.Series,
+    cv_metric: str,
+    splitter: Any,
+    n_trials: int = DEFAULT_TUNING_TRIALS,
+) -> dict[str, Any]:
+    """Small, fast Optuna search scored by the SAME cross-validation
+    metric the final comparison reports, so a tuned model's number is
+    genuinely optimized for what gets shown - not a different objective
+    computed some other way. Returns {} immediately (no Optuna call at
+    all) for model types with nothing meaningful to search, or if optuna
+    isn't installed - tuning is a bonus on top of a working default, not
+    a hard requirement for AutoML to function."""
+    if not _HAS_OPTUNA or name not in ("Logistic Regression", "Random Forest", "XGBoost", "LightGBM"):
+        return {}
+
+    def objective(trial: Any) -> float:
+        params = _suggest_hyperparams(trial, name)
+        model = _build_model(name, problem_type, y_train, imbalanced=False, extra_params=params)
+        scores = cross_val_score(model, X_train, y_train, cv=splitter, scoring=cv_metric)
+        return float(scores.mean())
+
+    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=RANDOM_STATE))
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    return study.best_params
+
+
+def _diagnose_fit(train_score: float, test_score: float, problem_type: str) -> str:
+    """A low training score means the model is too weak to even fit what
+    it was trained on - underfitting, regardless of how small the train/
+    test gap is (checked FIRST, since a weak model's gap is often small
+    too, which could otherwise look like "good fit" by gap alone). A
+    large train/test gap on top of a training score that's actually fine
+    is the classic overfitting signature - memorizing training data
+    without generalizing."""
+    underfit_threshold = (
+        UNDERFIT_SCORE_THRESHOLD_CLASSIFICATION if problem_type == "classification" else UNDERFIT_SCORE_THRESHOLD_REGRESSION
+    )
+    if train_score < underfit_threshold:
+        return "underfitting"
+    if (train_score - test_score) > OVERFIT_GAP_THRESHOLD:
+        return "overfitting"
+    return "good_fit"
 
 
 def _classification_metrics(y_true, y_pred) -> dict[str, float]:
@@ -391,11 +545,17 @@ def train_and_compare(
     problem_type: str | None = None,
     cv_folds: int = DEFAULT_CV_FOLDS,
     test_size: float = DEFAULT_TEST_SIZE,
+    tune_hyperparameters: bool = False,
 ) -> tuple[AutoMLResult, Any, np.ndarray, list[str], FeatureTransformer]:
     """Trains every candidate model for the detected/given problem type,
     cross-validates each on the training split, evaluates all of them on
     a held-out test split, and picks the best by the primary metric
     (accuracy for classification, R^2 for regression).
+
+    tune_hyperparameters=True runs a small Optuna search per model first
+    (see _tune_hyperparameters) - opt-in and off by default, since it
+    trades meaningfully more time for a (hopefully) better result, and
+    this all runs inside a single synchronous HTTP request.
 
     Returns (result, best_fitted_model, X_test, feature_names,
     transformer) - the fitted model and X_test let compute_shap_importance()
@@ -428,12 +588,16 @@ def train_and_compare(
     )
 
     is_imbalanced = class_imbalance is not None
-    candidates = _candidate_models(resolved_problem_type, y_train=y_train, imbalanced=is_imbalanced)
     cv_metric = "accuracy" if resolved_problem_type == "classification" else "r2"
     splitter = (
         StratifiedKFold(n_splits=min(cv_folds, y_train.value_counts().min()), shuffle=True, random_state=RANDOM_STATE)
         if resolved_problem_type == "classification"
         else KFold(n_splits=cv_folds, shuffle=True, random_state=RANDOM_STATE)
+    )
+    tuning_splitter = (
+        StratifiedKFold(n_splits=min(TUNING_CV_FOLDS, y_train.value_counts().min()), shuffle=True, random_state=RANDOM_STATE)
+        if resolved_problem_type == "classification"
+        else KFold(n_splits=TUNING_CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
     )
 
     model_results: list[ModelResult] = []
@@ -441,16 +605,33 @@ def train_and_compare(
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # sklearn/xgboost convergence & deprecation noise, not actionable here
-        for name, model in candidates.items():
+        for name in _candidate_model_names(resolved_problem_type):
             try:
+                tuned_params = (
+                    _tune_hyperparameters(name, resolved_problem_type, X_train, y_train, cv_metric, tuning_splitter)
+                    if tune_hyperparameters
+                    else {}
+                )
+                model = _build_model(name, resolved_problem_type, y_train, is_imbalanced, extra_params=tuned_params)
+
                 cv_scores = cross_val_score(model, X_train, y_train, cv=splitter, scoring=cv_metric)
                 model.fit(X_train, y_train)
-                y_pred = model.predict(X_test)
+                y_pred_test = model.predict(X_test)
+                y_pred_train = model.predict(X_train)
+
                 test_metrics = (
-                    _classification_metrics(y_test, y_pred)
+                    _classification_metrics(y_test, y_pred_test)
                     if resolved_problem_type == "classification"
-                    else _regression_metrics(y_test, y_pred)
+                    else _regression_metrics(y_test, y_pred_test)
                 )
+                train_score = (
+                    accuracy_score(y_train, y_pred_train)
+                    if resolved_problem_type == "classification"
+                    else r2_score(y_train, y_pred_train)
+                )
+                test_score = test_metrics["accuracy"] if resolved_problem_type == "classification" else test_metrics["r2"]
+                fit_diagnosis = _diagnose_fit(float(train_score), float(test_score), resolved_problem_type)
+
                 model_results.append(
                     ModelResult(
                         name=name,
@@ -458,6 +639,9 @@ def train_and_compare(
                         cv_score_std=round(float(cv_scores.std()), 4),
                         cv_metric=cv_metric,
                         test_metrics=test_metrics,
+                        train_score=round(float(train_score), 4),
+                        fit_diagnosis=fit_diagnosis,
+                        tuned_params=tuned_params or None,
                     )
                 )
                 fitted_models[name] = model
@@ -485,6 +669,19 @@ def train_and_compare(
             f"The target is imbalanced (largest class is {class_imbalance['ratio']}x the smallest) - "
             "models were trained with class_weight=\"balanced\" to compensate, but accuracy alone can "
             "still be misleading here; check precision/recall per class."
+        )
+    if best.fit_diagnosis == "overfitting":
+        best_test_score = best.test_metrics["accuracy"] if resolved_problem_type == "classification" else best.test_metrics["r2"]
+        result_warnings.append(
+            f"{best.name} (the best model) shows signs of overfitting - it scores {best.train_score} on "
+            f"training data but only {best_test_score} on the held-out test set. Consider simplifying the "
+            "model, gathering more data, or reviewing features for leakage."
+        )
+    elif best.fit_diagnosis == "underfitting":
+        result_warnings.append(
+            f"{best.name} (the best model) shows signs of underfitting - it scores only {best.train_score} "
+            "even on the data it was trained on. The features available may not be enough to predict this "
+            "target well, or a more expressive model / more feature engineering may help."
         )
 
     result = AutoMLResult(
