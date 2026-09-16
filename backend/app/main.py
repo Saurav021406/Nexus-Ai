@@ -15,6 +15,9 @@ from app.routers import agent
 from app.routers import approvals
 from app.routers import automation
 from app.routers import automl
+from app.routers import stats
+from app.routers import root_cause
+from app.routers import scenario
 
 app = FastAPI(title="Nexus AI Backend", version="0.1.0")
 
@@ -39,6 +42,9 @@ app.include_router(agent.router)
 app.include_router(approvals.router)
 app.include_router(automation.router)
 app.include_router(automl.router)
+app.include_router(stats.router)
+app.include_router(root_cause.router)
+app.include_router(scenario.router)
 
 
 @app.get("/")

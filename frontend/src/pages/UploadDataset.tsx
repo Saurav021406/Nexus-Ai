@@ -281,6 +281,51 @@ interface AutoMLVersion {
   models: AutoMLModelResult[]
 }
 
+interface RootCauseSegmentContribution {
+  segment_column: string
+  segment_value: string
+  before: number
+  after: number
+  delta: number
+  contribution_pct: number | null
+}
+
+interface RootCauseResult {
+  metric_column: string
+  date_column: string
+  aggregation: string
+  direction: string
+  period_before: { start: string; end: string; n_rows: number }
+  period_after: { start: string; end: string; n_rows: number }
+  overall_before: number
+  overall_after: number
+  overall_change: number
+  overall_pct_change: number | null
+  segment_columns_analyzed: string[]
+  top_contributors: RootCauseSegmentContribution[]
+  warnings: string[]
+  business_summary: AutoMLBusinessSummary
+}
+
+interface ScenarioAdjustmentRow {
+  column: string
+  type: 'percent' | 'absolute' | 'set'
+  value: string
+}
+
+interface ScenarioResult {
+  n_rows_simulated: number
+  adjustments: { column: string; type: string; value: string | number }[]
+  outcome_type: 'numeric' | 'categorical'
+  baseline_mean: number | null
+  scenario_mean: number | null
+  delta: number | null
+  pct_change: number | null
+  baseline_distribution: Record<string, number>
+  scenario_distribution: Record<string, number>
+  business_summary: AutoMLBusinessSummary
+}
+
 interface AutoMLPredictResponse {
   predictions: (string | number)[]
   model_id: string
@@ -409,7 +454,7 @@ interface VizGenerateResponse {
   interpreted: boolean
 }
 
-export type WorkspaceTab = 'upload' | 'profile' | 'analysis' | 'agent' | 'chat' | 'forecast' | 'automl' | 'clean' | 'eda' | 'visualize' | 'history' | 'usage'
+export type WorkspaceTab = 'upload' | 'profile' | 'analysis' | 'agent' | 'chat' | 'forecast' | 'automl' | 'root-cause' | 'clean' | 'eda' | 'visualize' | 'history' | 'usage'
 
 interface UploadDatasetProps {
   activeTab: WorkspaceTab
@@ -644,7 +689,7 @@ export default function UploadDataset({
   const [automlRunning, setAutomlRunning] = useState(false)
   const [automlError, setAutomlError] = useState<string | null>(null)
   const [automlResult, setAutomlResult] = useState<AutoMLResult | null>(null)
-  const [automlMode, setAutomlMode] = useState<'train' | 'cluster' | 'anomaly'>('train')
+  const [automlMode, setAutomlMode] = useState<'train' | 'cluster' | 'anomaly' | 'scenario'>('train')
   const [automlPredictInputs, setAutomlPredictInputs] = useState<Record<string, string>>({})
   const [automlPredicting, setAutomlPredicting] = useState(false)
   const [automlPredictError, setAutomlPredictError] = useState<string | null>(null)
@@ -662,6 +707,20 @@ export default function UploadDataset({
   const [detectingAnomalies, setDetectingAnomalies] = useState(false)
   const [anomalyError, setAnomalyError] = useState<string | null>(null)
   const [anomalyResult, setAnomalyResult] = useState<AnomalyResult | null>(null)
+  const [rootCauseMetricColumn, setRootCauseMetricColumn] = useState('')
+  const [rootCauseDateColumn, setRootCauseDateColumn] = useState('')
+  const [rootCauseAggregation, setRootCauseAggregation] = useState<'sum' | 'mean'>('sum')
+  const [rootCauseDirection, setRootCauseDirection] = useState<'decrease' | 'increase'>('decrease')
+  const [rootCauseSegmentColumns, setRootCauseSegmentColumns] = useState<string[]>([])
+  const [rootCauseRunning, setRootCauseRunning] = useState(false)
+  const [rootCauseError, setRootCauseError] = useState<string | null>(null)
+  const [rootCauseResult, setRootCauseResult] = useState<RootCauseResult | null>(null)
+  const [scenarioAdjustments, setScenarioAdjustments] = useState<ScenarioAdjustmentRow[]>([
+    { column: '', type: 'percent', value: '' },
+  ])
+  const [scenarioRunning, setScenarioRunning] = useState(false)
+  const [scenarioError, setScenarioError] = useState<string | null>(null)
+  const [scenarioResult, setScenarioResult] = useState<ScenarioResult | null>(null)
   const [automlVersions, setAutomlVersions] = useState<AutoMLVersion[]>([])
   const [automlVersionsLoading, setAutomlVersionsLoading] = useState(false)
   const [automlVersionsError, setAutomlVersionsError] = useState<string | null>(null)
@@ -1447,6 +1506,86 @@ export default function UploadDataset({
     }
   }
 
+  async function handleRunRootCause() {
+    if (!result || !rootCauseMetricColumn || !rootCauseDateColumn) return
+    setRootCauseRunning(true)
+    setRootCauseError(null)
+    setRootCauseResult(null)
+
+    try {
+      const headers = await authHeader()
+      const response = await fetch(`${API_BASE_URL}/root-cause/analyze`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataset_id: result.dataset_id,
+          metric_column: rootCauseMetricColumn,
+          date_column: rootCauseDateColumn,
+          aggregation: rootCauseAggregation,
+          direction: rootCauseDirection,
+          segment_columns: rootCauseSegmentColumns.length > 0 ? rootCauseSegmentColumns : null,
+        }),
+      })
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Root cause analysis failed (${response.status})`)
+      }
+      setRootCauseResult(await response.json())
+    } catch (err) {
+      setRootCauseError((err as Error).message)
+    } finally {
+      setRootCauseRunning(false)
+    }
+  }
+
+  function addScenarioAdjustmentRow() {
+    setScenarioAdjustments((prev) => [...prev, { column: '', type: 'percent', value: '' }])
+  }
+
+  function removeScenarioAdjustmentRow(index: number) {
+    setScenarioAdjustments((prev) => prev.filter((_, i) => i !== index))
+  }
+
+  function updateScenarioAdjustmentRow(index: number, patch: Partial<ScenarioAdjustmentRow>) {
+    setScenarioAdjustments((prev) => prev.map((row, i) => (i === index ? { ...row, ...patch } : row)))
+  }
+
+  async function handleRunScenario() {
+    if (!result || !automlResult?.model_id) return
+    const validAdjustments = scenarioAdjustments.filter((a) => a.column && a.value !== '')
+    if (validAdjustments.length === 0) return
+
+    setScenarioRunning(true)
+    setScenarioError(null)
+    setScenarioResult(null)
+
+    try {
+      const headers = await authHeader()
+      const response = await fetch(`${API_BASE_URL}/scenario/simulate`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataset_id: result.dataset_id,
+          model_id: automlResult.model_id,
+          adjustments: validAdjustments.map((a) => ({
+            column: a.column,
+            type: a.type,
+            value: a.type === 'set' ? a.value : Number(a.value),
+          })),
+        }),
+      })
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}))
+        throw new Error(errBody.detail || `Scenario simulation failed (${response.status})`)
+      }
+      setScenarioResult(await response.json())
+    } catch (err) {
+      setScenarioError((err as Error).message)
+    } finally {
+      setScenarioRunning(false)
+    }
+  }
+
   async function handleRunClustering() {
     if (!result) return
     setClustering(true)
@@ -1820,6 +1959,7 @@ export default function UploadDataset({
     { id: 'chat', label: 'Ask your data', disabled: !result },
     { id: 'forecast', label: 'Forecast', disabled: !result || result?.kind === 'document' },
     { id: 'automl', label: 'AutoML', disabled: !result || result?.kind === 'document' },
+    { id: 'root-cause', label: 'Root Cause', disabled: !result || result?.kind === 'document' },
     { id: 'clean', label: 'Clean Data', disabled: !result || result?.kind === 'document' },
     { id: 'eda', label: 'EDA & Charts', disabled: !result || result?.kind === 'document' },
     { id: 'visualize', label: 'Visualize', disabled: !result || result?.kind === 'document' },
@@ -3018,6 +3158,14 @@ export default function UploadDataset({
             >
               Anomaly detection
             </button>
+            <button
+              onClick={() => setAutomlMode('scenario')}
+              className={`rounded-lg px-3 py-1.5 text-sm font-medium ${
+                automlMode === 'scenario' ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+              }`}
+            >
+              Scenario simulator
+            </button>
           </div>
 
           {automlMode === 'train' && (
@@ -3517,6 +3665,147 @@ export default function UploadDataset({
           </>
           )}
 
+          {automlMode === 'scenario' && (
+          <>
+          {!automlResult?.model_id ? (
+            <div className="rounded-xl border border-slate-800 bg-slate-900 p-4">
+              <p className="text-sm text-slate-400">
+                Train a model first in "Supervised" mode - the scenario simulator uses that trained
+                model to predict outcomes of hypothetical changes.
+              </p>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-3">
+              <p className="text-sm text-slate-400">
+                What happens to <span className="text-slate-200">{automlResult.target_column}</span> if
+                you change a feature? Uses the trained {automlResult.best_model_name} model to compare a
+                baseline prediction against one with your adjustment(s) applied.
+              </p>
+
+              {scenarioAdjustments.map((row, i) => (
+                <div key={i} className="flex flex-wrap items-center gap-2">
+                  <select
+                    value={row.column}
+                    onChange={(e) => updateScenarioAdjustmentRow(i, { column: e.target.value })}
+                    className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:border-blue-500"
+                  >
+                    <option value="">Select column...</option>
+                    {(result.columns ?? [])
+                      .filter((col) => col.name !== automlResult.target_column)
+                      .map((col) => (
+                        <option key={col.name} value={col.name}>
+                          {col.name}
+                        </option>
+                      ))}
+                  </select>
+                  <select
+                    value={row.type}
+                    onChange={(e) => updateScenarioAdjustmentRow(i, { type: e.target.value as ScenarioAdjustmentRow['type'] })}
+                    className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:border-blue-500"
+                  >
+                    <option value="percent">% change</option>
+                    <option value="absolute">+/- amount</option>
+                    <option value="set">Set to value</option>
+                  </select>
+                  <input
+                    type="text"
+                    value={row.value}
+                    onChange={(e) => updateScenarioAdjustmentRow(i, { value: e.target.value })}
+                    placeholder={row.type === 'percent' ? 'e.g. 10' : row.type === 'absolute' ? 'e.g. 5' : 'new value'}
+                    className="w-32 rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none focus:border-blue-500"
+                  />
+                  {scenarioAdjustments.length > 1 && (
+                    <button
+                      onClick={() => removeScenarioAdjustmentRow(i)}
+                      className="text-xs text-slate-500 hover:text-red-400"
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+              ))}
+
+              <button
+                onClick={addScenarioAdjustmentRow}
+                className="text-xs font-medium text-cyan-400 hover:text-cyan-300"
+              >
+                + Add another adjustment
+              </button>
+
+              <div>
+                <button
+                  onClick={handleRunScenario}
+                  disabled={scenarioRunning}
+                  className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+                >
+                  {scenarioRunning ? 'Simulating...' : 'Run scenario'}
+                </button>
+              </div>
+
+              {scenarioError && <ErrorBanner message={scenarioError} />}
+
+              {scenarioResult && (
+                <div className="space-y-3 border-t border-slate-800 pt-3">
+                  <p className="text-xs text-slate-500">
+                    Simulated across {scenarioResult.n_rows_simulated} rows:{' '}
+                    {scenarioResult.adjustments
+                      .map((a) => `${a.column} ${a.type === 'percent' ? `${a.value}%` : a.type === 'absolute' ? `+${a.value}` : `= ${a.value}`}`)
+                      .join(', ')}
+                  </p>
+
+                  {scenarioResult.outcome_type === 'numeric' ? (
+                    <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+                      <Stat label="Baseline" value={scenarioResult.baseline_mean ?? 0} />
+                      <Stat label="Scenario" value={scenarioResult.scenario_mean ?? 0} />
+                      <Stat label="Change" value={scenarioResult.delta ?? 0} />
+                      <Stat
+                        label="% change"
+                        value={scenarioResult.pct_change !== null ? `${scenarioResult.pct_change}%` : 'n/a'}
+                        isText
+                      />
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                      <div className="rounded-xl border border-slate-800 p-3">
+                        <p className="mb-1 text-xs font-medium text-slate-400">Baseline distribution</p>
+                        {Object.entries(scenarioResult.baseline_distribution).map(([cls, pct]) => (
+                          <p key={cls} className="text-xs text-slate-300">
+                            {cls}: {(pct * 100).toFixed(1)}%
+                          </p>
+                        ))}
+                      </div>
+                      <div className="rounded-xl border border-slate-800 p-3">
+                        <p className="mb-1 text-xs font-medium text-slate-400">Scenario distribution</p>
+                        {Object.entries(scenarioResult.scenario_distribution).map(([cls, pct]) => (
+                          <p key={cls} className="text-xs text-slate-300">
+                            {cls}: {(pct * 100).toFixed(1)}%
+                          </p>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="rounded-xl border border-blue-800 bg-blue-950/30 p-4 space-y-2">
+                    <h4 className="text-sm font-semibold text-blue-300">Business summary</h4>
+                    <p className="text-sm text-slate-200">{scenarioResult.business_summary.summary}</p>
+                    {scenarioResult.business_summary.key_metrics.length > 0 && (
+                      <ul className="list-inside list-disc text-sm text-slate-300">
+                        {scenarioResult.business_summary.key_metrics.map((k, i) => (
+                          <li key={i}>{k}</li>
+                        ))}
+                      </ul>
+                    )}
+                    {scenarioResult.business_summary.recommendation && (
+                      <p className="text-sm text-indigo-300">{scenarioResult.business_summary.recommendation}</p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          </>
+          )}
+
           {automlVersionsError && <ErrorBanner message={automlVersionsError} />}
 
           {automlVersionsLoading && automlVersions.length === 0 && (
@@ -3545,6 +3834,185 @@ export default function UploadDataset({
                 Past runs show metrics only - a trained model can only be used for new predictions for
                 1 hour after training, so older runs can't be re-predicted on without running again.
               </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ---------- Root Cause Analysis tab ---------- */}
+      {result && result.kind !== 'document' && activeTab === 'root-cause' && (
+        <div className="space-y-4 py-6">
+          <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4">
+            <h3 className="font-medium text-white">Root Cause Analysis</h3>
+            <p className="mt-1 text-sm text-slate-400">
+              Splits your data's date range into two equal periods and finds which segments actually
+              drove a metric's change - not just that it changed, but what's behind it.
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+              <label className="text-sm text-slate-400">Metric:</label>
+              <select
+                value={rootCauseMetricColumn}
+                onChange={(e) => setRootCauseMetricColumn(e.target.value)}
+                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-blue-500"
+              >
+                <option value="">Select a numeric column...</option>
+                {(result.columns ?? [])
+                  .filter((col) => col.dtype.toLowerCase().includes('int') || col.dtype.toLowerCase().includes('float'))
+                  .map((col) => (
+                    <option key={col.name} value={col.name}>
+                      {col.name}
+                    </option>
+                  ))}
+              </select>
+
+              <label className="text-sm text-slate-400">Date column:</label>
+              <select
+                value={rootCauseDateColumn}
+                onChange={(e) => setRootCauseDateColumn(e.target.value)}
+                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-blue-500"
+              >
+                <option value="">Select a date column...</option>
+                {(result.columns ?? []).map((col) => (
+                  <option key={col.name} value={col.name}>
+                    {col.name} ({col.dtype})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+              <label className="text-sm text-slate-400">Aggregation:</label>
+              <select
+                value={rootCauseAggregation}
+                onChange={(e) => setRootCauseAggregation(e.target.value as 'sum' | 'mean')}
+                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-blue-500"
+              >
+                <option value="sum">Sum</option>
+                <option value="mean">Average</option>
+              </select>
+
+              <label className="text-sm text-slate-400">Looking for:</label>
+              <select
+                value={rootCauseDirection}
+                onChange={(e) => setRootCauseDirection(e.target.value as 'decrease' | 'increase')}
+                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-blue-500"
+              >
+                <option value="decrease">What drove a decrease</option>
+                <option value="increase">What drove an increase</option>
+              </select>
+
+              <button
+                onClick={handleRunRootCause}
+                disabled={rootCauseRunning || !rootCauseMetricColumn || !rootCauseDateColumn}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+              >
+                {rootCauseRunning ? 'Analyzing...' : 'Find root cause'}
+              </button>
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <label className="text-xs text-slate-500">
+                Segment columns to check (leave all unchecked to auto-detect):
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {(result.columns ?? [])
+                  .filter((col) => col.name !== rootCauseMetricColumn && col.name !== rootCauseDateColumn)
+                  .map((col) => {
+                    const checked = rootCauseSegmentColumns.includes(col.name)
+                    return (
+                      <button
+                        key={col.name}
+                        type="button"
+                        onClick={() =>
+                          setRootCauseSegmentColumns((prev) =>
+                            checked ? prev.filter((c) => c !== col.name) : [...prev, col.name]
+                          )
+                        }
+                        className={`rounded-full px-3 py-1 text-xs font-medium ${
+                          checked ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                        }`}
+                      >
+                        {col.name}
+                      </button>
+                    )
+                  })}
+              </div>
+            </div>
+          </div>
+
+          {rootCauseError && <ErrorBanner message={rootCauseError} />}
+
+          {rootCauseResult && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+                <Stat label={`Before (${rootCauseResult.period_before.start})`} value={rootCauseResult.overall_before} />
+                <Stat label={`After (${rootCauseResult.period_after.start})`} value={rootCauseResult.overall_after} />
+                <Stat label="Change" value={rootCauseResult.overall_change} />
+                <Stat
+                  label="% change"
+                  value={rootCauseResult.overall_pct_change !== null ? `${rootCauseResult.overall_pct_change}%` : 'n/a'}
+                  isText
+                />
+              </div>
+
+              {rootCauseResult.warnings.length > 0 && (
+                <div className="rounded-xl border border-amber-800 bg-amber-950/30 p-4">
+                  <ul className="list-inside list-disc text-sm text-amber-200/90">
+                    {rootCauseResult.warnings.map((w, i) => (
+                      <li key={i}>{w}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {rootCauseResult.top_contributors.length > 0 && (
+                <div className="rounded-xl border border-slate-800 overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-900 text-slate-400">
+                      <tr>
+                        <th className="text-left p-2">Column</th>
+                        <th className="text-left p-2">Segment</th>
+                        <th className="text-left p-2">Before</th>
+                        <th className="text-left p-2">After</th>
+                        <th className="text-left p-2">Delta</th>
+                        <th className="text-left p-2">% of total change</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rootCauseResult.top_contributors.map((c, i) => (
+                        <tr key={i} className={`border-t border-slate-800 ${i === 0 ? 'bg-blue-950/30' : ''}`}>
+                          <td className="p-2 text-slate-400">{c.segment_column}</td>
+                          <td className="p-2 font-medium text-slate-200">{c.segment_value}</td>
+                          <td className="p-2 text-slate-400">{c.before}</td>
+                          <td className="p-2 text-slate-400">{c.after}</td>
+                          <td className={`p-2 ${c.delta < 0 ? 'text-red-400' : 'text-emerald-400'}`}>{c.delta}</td>
+                          <td className="p-2 text-slate-400">
+                            {c.contribution_pct !== null ? `${c.contribution_pct}%` : 'n/a'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              <div className="rounded-xl border border-blue-800 bg-blue-950/30 p-4 space-y-2">
+                <h4 className="text-sm font-semibold text-blue-300">Business summary</h4>
+                <p className="text-sm text-slate-200">{rootCauseResult.business_summary.summary}</p>
+                {rootCauseResult.business_summary.key_metrics.length > 0 && (
+                  <ul className="list-inside list-disc text-sm text-slate-300">
+                    {rootCauseResult.business_summary.key_metrics.map((k, i) => (
+                      <li key={i}>{k}</li>
+                    ))}
+                  </ul>
+                )}
+                {rootCauseResult.business_summary.recommendation && (
+                  <p className="text-sm text-indigo-300">{rootCauseResult.business_summary.recommendation}</p>
+                )}
+              </div>
             </div>
           )}
         </div>
