@@ -3883,6 +3883,16 @@ export default function UploadDataset({
               </select>
             </div>
 
+            {!(result.columns ?? []).some((c) => c.dtype.toLowerCase().includes('datetime')) && (
+              <p className="text-xs text-amber-400">
+                No column in this dataset was detected as a date/time field. Root Cause Analysis
+                compares a "before" and "after" time period, so it needs one - if your dataset genuinely
+                has no dates (like this one), this feature won't produce a useful result here. If your
+                dates are actually stored as plain text (e.g. "2026-01-15"), you can still pick that
+                column above and it may work.
+              </p>
+            )}
+
             <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
               <label className="text-sm text-slate-400">Aggregation:</label>
               <select

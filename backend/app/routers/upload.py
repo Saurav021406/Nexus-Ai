@@ -13,7 +13,14 @@ from app.supabase_client import supabase_admin
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
 BUCKET_NAME = "datasets"
-MAX_FILE_SIZE_MB = 25
+# Was 25MB - raised to 100MB. Note: Supabase Storage buckets ALSO enforce
+# their own max file size (configurable per-bucket in your Supabase
+# dashboard under Storage > the "datasets" bucket > Settings - defaults to
+# 50MB on many projects). Raising this constant alone isn't enough if that
+# bucket-level limit is still lower than what you set here - the upload
+# would still get rejected by Supabase itself before this check even runs
+# on a genuinely large file.
+MAX_FILE_SIZE_MB = 100
 TABULAR_EXTENSIONS = (".csv", ".xlsx", ".xls")
 DOCUMENT_EXTENSIONS = (".pdf", ".docx")
 ALLOWED_EXTENSIONS = TABULAR_EXTENSIONS + DOCUMENT_EXTENSIONS
