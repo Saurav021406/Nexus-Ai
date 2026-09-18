@@ -3483,7 +3483,7 @@ export default function UploadDataset({
               </label>
               <div className="flex flex-wrap gap-2">
                 {(result.columns ?? [])
-                  .filter((col) => col.dtype.toLowerCase().includes('int') || col.dtype.toLowerCase().includes('float'))
+                  .filter((col) => col.dtype.toLowerCase() === 'numeric')
                   .map((col) => {
                     const checked = clusterFeatureColumns.includes(col.name)
                     return (
@@ -3571,7 +3571,7 @@ export default function UploadDataset({
               </label>
               <div className="flex flex-wrap gap-2">
                 {(result.columns ?? [])
-                  .filter((col) => col.dtype.toLowerCase().includes('int') || col.dtype.toLowerCase().includes('float'))
+                  .filter((col) => col.dtype.toLowerCase() === 'numeric')
                   .map((col) => {
                     const checked = anomalyFeatureColumns.includes(col.name)
                     return (
@@ -3860,7 +3860,7 @@ export default function UploadDataset({
               >
                 <option value="">Select a numeric column...</option>
                 {(result.columns ?? [])
-                  .filter((col) => col.dtype.toLowerCase().includes('int') || col.dtype.toLowerCase().includes('float'))
+                  .filter((col) => col.dtype.toLowerCase() === 'numeric')
                   .map((col) => (
                     <option key={col.name} value={col.name}>
                       {col.name}
