@@ -1,26 +1,33 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from './lib/supabaseClient'
 import { apiFetch } from './lib/api'
 import Login from './pages/Login'
-import UploadDataset, { type WorkspaceTab } from './pages/UploadDataset'
+import ResetPassword from './pages/ResetPassword'
+import type { WorkspaceTab } from './pages/UploadDataset'
+
+const UploadDataset = lazy(() => import('./pages/UploadDataset'))
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [loadingSession, setLoadingSession] = useState(true)
+  const [passwordRecovery, setPasswordRecovery] = useState(
+    () => new URLSearchParams(window.location.search).get('mode') === 'reset-password'
+  )
   const [backendMessage, setBackendMessage] = useState<string>('')
   const [checking, setChecking] = useState(false)
   const [activeWorkspaceTab, setActiveWorkspaceTab] = useState<WorkspaceTab>('upload')
   const [hasDataset, setHasDataset] = useState(false)
 
   useEffect(() => {
+    const { data: listener } = supabase.auth.onAuthStateChange((event, newSession) => {
+      setSession(newSession)
+      if (event === 'PASSWORD_RECOVERY') setPasswordRecovery(true)
+    })
+
     supabase.auth.getSession().then(({ data }) => {
       setSession(data.session)
       setLoadingSession(false)
-    })
-
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
-      setSession(newSession)
     })
 
     return () => listener.subscription.unsubscribe()
@@ -53,6 +60,17 @@ export default function App() {
           Loading your workspace...
         </div>
       </div>
+    )
+  }
+
+  if (passwordRecovery) {
+    return (
+      <ResetPassword
+        onComplete={() => {
+          setPasswordRecovery(false)
+          window.history.replaceState(null, '', window.location.pathname)
+        }}
+      />
     )
   }
 
@@ -148,11 +166,20 @@ export default function App() {
           </p>
         )}
 
-        <UploadDataset
-          activeTab={activeWorkspaceTab}
-          onTabChange={setActiveWorkspaceTab}
-          onDatasetAvailabilityChange={setHasDataset}
-        />
+        <Suspense
+          fallback={
+            <div className="flex items-center gap-3 rounded-2xl border border-white/[0.08] bg-[#0d131d] px-5 py-6 text-sm text-slate-400">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-cyan-400" />
+              Loading workspace tools...
+            </div>
+          }
+        >
+          <UploadDataset
+            activeTab={activeWorkspaceTab}
+            onTabChange={setActiveWorkspaceTab}
+            onDatasetAvailabilityChange={setHasDataset}
+          />
+        </Suspense>
       </main>
     </div>
   )
