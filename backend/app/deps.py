@@ -1,8 +1,8 @@
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, Request, status
 from app.supabase_client import supabase_anon
 
 
-async def get_current_user(authorization: str | None = Header(default=None)):
+async def get_current_user(request: Request, authorization: str | None = Header(default=None)):
     """
     Expects header: Authorization: Bearer <supabase_access_token>
     The frontend gets this token from supabase.auth.getSession() after login.
@@ -27,4 +27,5 @@ async def get_current_user(authorization: str | None = Header(default=None)):
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token"
         )
 
+    request.state.user_id = user_response.user.id
     return user_response.user
