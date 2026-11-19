@@ -1,11 +1,14 @@
 import numpy as np
 import pandas as pd
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sklearn.datasets import make_classification, make_regression
 
 import app.routers.automl as automl_router
-from app.main import app
+
+app = FastAPI()
+app.include_router(automl_router.router)
 
 
 class FakeUser:
@@ -99,6 +102,48 @@ def test_cluster_endpoint_returns_real_clusters(monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert 2 <= body["n_clusters"] <= 8
+
+
+def test_cluster_endpoint_accepts_hierarchical_algorithm(monkeypatch):
+    from sklearn.datasets import make_blobs
+
+    X, _ = make_blobs(n_samples=90, centers=3, n_features=3, random_state=0, cluster_std=0.5)
+    df = pd.DataFrame(X, columns=["a", "b", "c"])
+    monkeypatch.setattr(automl_router, "get_dataset_dataframe", lambda dataset_id, user_id: df)
+
+    client = TestClient(app)
+    response = client.post("/automl/cluster", json={"dataset_id": "d1", "algorithm": "hierarchical"})
+
+    assert response.status_code == 200
+    assert response.json()["algorithm"] == "hierarchical"
+
+
+def test_cluster_endpoint_accepts_dbscan_parameters(monkeypatch):
+    from sklearn.datasets import make_blobs
+
+    X, _ = make_blobs(n_samples=90, centers=3, n_features=3, random_state=0, cluster_std=0.5)
+    df = pd.DataFrame(X, columns=["a", "b", "c"])
+    monkeypatch.setattr(automl_router, "get_dataset_dataframe", lambda dataset_id, user_id: df)
+
+    client = TestClient(app)
+    response = client.post(
+        "/automl/cluster",
+        json={"dataset_id": "d1", "algorithm": "dbscan", "eps": 0.5, "min_samples": 1},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["algorithm"] == "dbscan"
+    assert body["n_clusters"] == 3
+    assert body["noise_count"] == 0
+
+
+def test_cluster_endpoint_rejects_unknown_algorithm():
+    client = TestClient(app)
+
+    response = client.post("/automl/cluster", json={"dataset_id": "d1", "algorithm": "meanshift"})
+
+    assert response.status_code == 422
 
 
 def test_cluster_endpoint_returns_400_for_insufficient_data(monkeypatch):

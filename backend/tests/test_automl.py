@@ -39,6 +39,16 @@ def test_detects_regression_for_continuous_numeric_target():
     assert automl.detect_problem_type(target) == "regression"
 
 
+def test_new_supervised_models_are_candidates_for_both_problem_types():
+    required = {"Decision Tree", "Support Vector Machine", "K-Nearest Neighbors"}
+
+    for problem_type in ("classification", "regression"):
+        names = set(automl._candidate_model_names(problem_type))
+        assert required <= names
+        if automl._HAS_CATBOOST:
+            assert "CatBoost" in names
+
+
 def test_raises_on_all_null_target():
     target = pd.Series([None, None, None])
     with pytest.raises(ValueError):
@@ -58,6 +68,10 @@ def test_classification_trains_multiple_models_and_picks_a_best_one():
     best = next(m for m in result.models if m.name == result.best_model_name)
     assert 0.0 <= best.cv_score_mean <= 1.0
     assert "accuracy" in best.test_metrics
+    successfully_trained = {m.name for m in result.models if "error" not in m.test_metrics}
+    assert {"Decision Tree", "Support Vector Machine", "K-Nearest Neighbors"} <= successfully_trained
+    if automl._HAS_CATBOOST:
+        assert "CatBoost" in successfully_trained
     assert fitted_model is not None
     assert len(feature_names) == 5
 
@@ -81,6 +95,10 @@ def test_regression_trains_multiple_models_and_picks_a_best_one():
     assert result.problem_type == "regression"
     assert len(result.models) >= 2
     assert result.primary_metric == "r2"
+    successfully_trained = {m.name for m in result.models if "error" not in m.test_metrics}
+    assert {"Decision Tree", "Support Vector Machine", "K-Nearest Neighbors"} <= successfully_trained
+    if automl._HAS_CATBOOST:
+        assert "CatBoost" in successfully_trained
     best = next(m for m in result.models if m.name == result.best_model_name)
     assert "r2" in best.test_metrics
     assert "rmse" in best.test_metrics
@@ -188,6 +206,48 @@ def test_cluster_dataset_finds_a_reasonable_k():
     assert 2 <= result["n_clusters"] <= 8
     assert result["silhouette_score"] > 0.3  # well-separated synthetic blobs should score decently
     assert sum(result["cluster_sizes"].values()) == 150
+
+
+def test_cluster_dataset_supports_hierarchical_clustering():
+    X, _ = make_blobs(n_samples=150, centers=3, n_features=4, random_state=0, cluster_std=0.5)
+    df = pd.DataFrame(X, columns=[f"f{i}" for i in range(4)])
+
+    result = automl.cluster_dataset(df, algorithm="hierarchical")
+
+    assert result["algorithm"] == "hierarchical"
+    assert 2 <= result["n_clusters"] <= 8
+    assert result["silhouette_score"] > 0.3
+    assert result["noise_count"] == 0
+
+
+def test_cluster_dataset_supports_dbscan_and_scores_non_noise_rows():
+    X, _ = make_blobs(n_samples=150, centers=3, n_features=4, random_state=0, cluster_std=0.5)
+    df = pd.DataFrame(X, columns=[f"f{i}" for i in range(4)])
+
+    result = automl.cluster_dataset(df, algorithm="dbscan", eps=0.5, min_samples=5)
+
+    assert result["algorithm"] == "dbscan"
+    assert result["n_clusters"] == 3
+    assert result["noise_count"] == 0
+    assert result["silhouette_score"] > 0.3
+
+
+def test_dbscan_reports_all_noise_without_a_silhouette_score():
+    df = pd.DataFrame({"a": range(30), "b": np.arange(30, dtype=float) ** 2})
+
+    result = automl.cluster_dataset(df, algorithm="dbscan", eps=1e-6, min_samples=5)
+
+    assert result["n_clusters"] == 0
+    assert result["noise_count"] == 30
+    assert result["silhouette_score"] is None
+    assert result["cluster_sizes"][-1] == 30
+
+
+def test_cluster_dataset_rejects_unknown_algorithm():
+    df = pd.DataFrame({"a": range(30), "b": range(30)})
+
+    with pytest.raises(ValueError, match="Unsupported clustering algorithm"):
+        automl.cluster_dataset(df, algorithm="meanshift")
 
 
 def test_cluster_dataset_raises_with_too_few_numeric_columns():
