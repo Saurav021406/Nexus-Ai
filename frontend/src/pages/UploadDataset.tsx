@@ -2,6 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import _createPlotlyComponent from 'react-plotly.js/factory'
 import Plotly from 'plotly.js-dist-min'
 import { supabase } from '../lib/supabaseClient'
+import RecommendationEngine from './RecommendationEngine'
+import MeetingIntelligence from './MeetingIntelligence'
+import EmailGenerator from './EmailGenerator'
+import LiveMonitoring from './LiveMonitoring'
+import AuditLogs from './AuditLogs'
 
 // FIX: Unwrap the function if Vite nested it inside a '.default' property
 const createPlotlyComponent = (_createPlotlyComponent as any).default || _createPlotlyComponent
@@ -335,12 +340,16 @@ interface AutoMLPredictResponse {
 }
 
 interface AutoMLClusterResult {
+  algorithm: AutoMLClusteringAlgorithm
   n_clusters: number
-  silhouette_score: number
+  noise_count: number
+  silhouette_score: number | null
   cluster_sizes: Record<string, number>
   cluster_profiles: Record<string, Record<string, number>>
   feature_columns: string[]
 }
+
+type AutoMLClusteringAlgorithm = 'kmeans' | 'dbscan' | 'hierarchical'
 
 interface AnomalyRecord {
   row_index: number
@@ -454,7 +463,7 @@ interface VizGenerateResponse {
   interpreted: boolean
 }
 
-export type WorkspaceTab = 'upload' | 'profile' | 'analysis' | 'agent' | 'chat' | 'forecast' | 'automl' | 'root-cause' | 'clean' | 'eda' | 'visualize' | 'history' | 'usage'
+export type WorkspaceTab = 'upload' | 'profile' | 'analysis' | 'agent' | 'chat' | 'forecast' | 'automl' | 'root-cause' | 'recommendations' | 'meeting' | 'email' | 'monitoring' | 'audit-logs' | 'clean' | 'eda' | 'visualize' | 'history' | 'usage'
 
 interface UploadDatasetProps {
   activeTab: WorkspaceTab
@@ -699,6 +708,9 @@ export default function UploadDataset({
   const [batchPredicting, setBatchPredicting] = useState(false)
   const [batchPredictError, setBatchPredictError] = useState<string | null>(null)
   const [clusterFeatureColumns, setClusterFeatureColumns] = useState<string[]>([])
+  const [clusterAlgorithm, setClusterAlgorithm] = useState<AutoMLClusteringAlgorithm>('kmeans')
+  const [clusterDbscanEps, setClusterDbscanEps] = useState(0.5)
+  const [clusterDbscanMinSamples, setClusterDbscanMinSamples] = useState(5)
   const [clustering, setClustering] = useState(false)
   const [clusterError, setClusterError] = useState<string | null>(null)
   const [clusterResult, setClusterResult] = useState<AutoMLClusterResult | null>(null)
@@ -1600,6 +1612,9 @@ export default function UploadDataset({
         body: JSON.stringify({
           dataset_id: result.dataset_id,
           feature_columns: clusterFeatureColumns.length > 0 ? clusterFeatureColumns : null,
+          algorithm: clusterAlgorithm,
+          eps: clusterDbscanEps,
+          min_samples: clusterDbscanMinSamples,
         }),
       })
       if (!response.ok) {
@@ -1951,53 +1966,95 @@ export default function UploadDataset({
     }
   }
 
-  const tabs: { id: WorkspaceTab; label: string; disabled?: boolean }[] = [
-    { id: 'upload', label: 'Upload CSV' },
-    { id: 'profile', label: 'Data profile', disabled: !result },
-    { id: 'analysis', label: 'AI analysis', disabled: !result || result?.kind === 'document' },
-    { id: 'agent', label: 'Multi-Agent', disabled: !result },
-    { id: 'chat', label: 'Ask your data', disabled: !result },
-    { id: 'forecast', label: 'Forecast', disabled: !result || result?.kind === 'document' },
-    { id: 'automl', label: 'AutoML', disabled: !result || result?.kind === 'document' },
-    { id: 'root-cause', label: 'Root Cause', disabled: !result || result?.kind === 'document' },
-    { id: 'clean', label: 'Clean Data', disabled: !result || result?.kind === 'document' },
-    { id: 'eda', label: 'EDA & Charts', disabled: !result || result?.kind === 'document' },
-    { id: 'visualize', label: 'Visualize', disabled: !result || result?.kind === 'document' },
-    { id: 'history', label: 'History' },
-    { id: 'usage', label: 'Usage' },
+  const tabs: { id: WorkspaceTab; label: string; group: 'Data' | 'AI tools' | 'Operations'; disabled?: boolean }[] = [
+    { id: 'upload', label: 'Upload data', group: 'Data' },
+    { id: 'profile', label: 'Data profile', group: 'Data', disabled: !result },
+    { id: 'clean', label: 'Clean data', group: 'Data', disabled: !result || result?.kind === 'document' },
+    { id: 'eda', label: 'EDA & charts', group: 'Data', disabled: !result || result?.kind === 'document' },
+    { id: 'visualize', label: 'Visualize', group: 'Data', disabled: !result || result?.kind === 'document' },
+    { id: 'analysis', label: 'AI analysis', group: 'AI tools', disabled: !result || result?.kind === 'document' },
+    { id: 'agent', label: 'Multi-Agent', group: 'AI tools', disabled: !result },
+    { id: 'chat', label: 'Ask your data', group: 'AI tools', disabled: !result },
+    { id: 'forecast', label: 'Forecast', group: 'AI tools', disabled: !result || result?.kind === 'document' },
+    { id: 'automl', label: 'AutoML', group: 'AI tools', disabled: !result || result?.kind === 'document' },
+    { id: 'root-cause', label: 'Root cause', group: 'AI tools', disabled: !result || result?.kind === 'document' },
+    { id: 'recommendations', label: 'Recommendations', group: 'AI tools', disabled: !result || result?.kind === 'document' },
+    { id: 'meeting', label: 'Meeting intelligence', group: 'AI tools' },
+    { id: 'email', label: 'Email generator', group: 'AI tools' },
+    { id: 'monitoring', label: 'Live monitoring', group: 'Operations' },
+    { id: 'history', label: 'Dataset history', group: 'Operations' },
+    { id: 'usage', label: 'Usage', group: 'Operations' },
+    { id: 'audit-logs', label: 'Audit logs', group: 'Operations' },
   ]
 
   return (
-    <section className="rounded-2xl border border-slate-800 bg-slate-900/40 p-4 shadow-2xl shadow-black/10 sm:p-6">
-      <div className="flex flex-col gap-4 border-b border-slate-800 pb-5 sm:flex-row sm:items-center sm:justify-between">
+    <section className="overflow-hidden rounded-2xl border border-white/[0.08] bg-[#0d131d] shadow-xl shadow-black/20">
+      <div className="flex flex-col gap-3 border-b border-white/[0.07] bg-white/[0.015] px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
         <div>
-          <h2 className="text-xl font-semibold text-white">Data studio</h2>
-          <p className="mt-1 text-sm text-slate-400">
-            Upload, profile, and analyze your data in dedicated workspace tabs.
-          </p>
+          <div className="flex items-center gap-2">
+            <h2 className="text-base font-semibold text-white">Workspace tools</h2>
+            <span className="rounded-full border border-slate-700/80 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-400">
+              {tabs.length} tools
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-slate-500">Choose a tool to work with your data or workspace.</p>
         </div>
-        {result && <p className="text-sm font-medium text-cyan-300">{result.filename}</p>}
+        {result && (
+          <div className="flex min-w-0 items-center gap-2 rounded-lg border border-emerald-500/15 bg-emerald-500/[0.04] px-3 py-2">
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400" />
+            <p className="truncate text-xs font-medium text-slate-200">{result.filename}</p>
+            {result.kind !== 'document' && (
+              <span className="shrink-0 text-[11px] text-slate-500">
+                {result.row_count?.toLocaleString()} rows
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
-      <div className="mt-5 flex gap-2 overflow-x-auto border-b border-slate-800 pb-3" role="tablist" aria-label="Dataset workspace">
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            role="tab"
-            aria-selected={activeTab === tab.id}
-            disabled={tab.disabled}
-            onClick={() => onTabChange(tab.id)}
-            className={`whitespace-nowrap rounded-lg px-4 py-2 text-sm font-medium transition ${
-              activeTab === tab.id
-                ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/30'
-                : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200 disabled:cursor-not-allowed disabled:opacity-40'
-            }`}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
+      <div className="grid lg:grid-cols-[256px_minmax(0,1fr)]">
+        <nav
+          aria-label="Workspace tools"
+          className="grid content-start gap-4 border-b border-white/[0.07] p-3 sm:grid-cols-2 sm:p-4 lg:block lg:max-h-[calc(100vh-110px)] lg:space-y-5 lg:overflow-y-auto lg:border-b-0 lg:border-r lg:border-white/[0.07]"
+        >
+          {(['Data', 'AI tools', 'Operations'] as const).map((group) => (
+            <section key={group} className="min-w-0">
+              <h3 className="mb-1.5 px-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+                {group}
+              </h3>
+              <div className="grid grid-cols-2 gap-1 sm:grid-cols-1">
+                {tabs.filter((tab) => tab.group === group).map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    aria-pressed={activeTab === tab.id}
+                    disabled={tab.disabled}
+                    title={tab.disabled ? 'Upload a compatible dataset to enable this tool' : undefined}
+                    onClick={() => onTabChange(tab.id)}
+                    className={`flex min-w-0 items-center gap-2 rounded-lg px-2.5 py-2.5 text-left text-[13px] font-medium transition ${
+                      activeTab === tab.id
+                        ? 'bg-cyan-400/[0.1] text-cyan-200 ring-1 ring-inset ring-cyan-400/20'
+                        : 'text-slate-400 hover:bg-white/[0.04] hover:text-slate-200 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent'
+                    }`}
+                  >
+                    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${activeTab === tab.id ? 'bg-cyan-300' : 'bg-slate-700'}`} />
+                    <span className="truncate">{tab.label}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+          ))}
+          {!result && (
+            <div className="hidden rounded-xl border border-dashed border-slate-700/80 bg-white/[0.015] p-3 lg:block">
+              <p className="text-xs font-medium text-slate-300">Start with your data</p>
+              <p className="mt-1 text-[11px] leading-5 text-slate-500">
+                Upload a dataset to unlock profiling, analysis, and modeling tools.
+              </p>
+            </div>
+          )}
+        </nav>
+
+        <div className="min-w-0 px-4 pb-5 sm:px-6 lg:py-5">
 
       {/* ---------- Upload tab ---------- */}
       {activeTab === 'upload' && (
@@ -2006,20 +2063,46 @@ export default function UploadDataset({
             <h3 className="text-lg font-medium text-white">Upload a dataset</h3>
             <p className="mt-1 text-sm text-slate-400">Choose a CSV, Excel (.xlsx), PDF, or Word (.docx) file.</p>
           </div>
-          <label className="block rounded-xl border border-dashed border-slate-700 bg-slate-950/30 p-6 transition hover:border-blue-500/70">
-            <span className="sr-only">Choose CSV file</span>
+          <label className="group flex cursor-pointer flex-col items-center rounded-2xl border border-dashed border-slate-700/80 bg-white/[0.015] px-5 py-10 text-center transition hover:border-cyan-400/50 hover:bg-cyan-400/[0.025]">
+            <span className="mb-4 flex h-12 w-12 items-center justify-center rounded-2xl border border-cyan-400/15 bg-cyan-400/[0.07] text-cyan-300 transition group-hover:scale-105">
+              <svg viewBox="0 0 24 24" fill="none" className="h-6 w-6" aria-hidden="true">
+                <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14.5v4A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5v-4" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </span>
+            <span className="text-sm font-semibold text-slate-200">Choose a dataset to get started</span>
+            <span className="mt-1.5 text-xs text-slate-500">CSV, Excel, PDF, and Word files are supported.</span>
+            <span className="mt-5 rounded-lg border border-slate-700/80 bg-slate-900 px-4 py-2 text-xs font-semibold text-slate-200 transition group-hover:border-cyan-400/30 group-hover:text-white">
+              Browse files
+            </span>
             <input
               type="file"
               accept=".csv,.xlsx,.xls,.pdf,.docx"
               onChange={handleFileChange}
               disabled={uploading}
-              className="block w-full text-sm text-slate-300 file:mr-4 file:rounded-lg file:border-0 file:bg-blue-600 file:px-4 file:py-2 file:text-sm file:font-medium file:text-white hover:file:bg-blue-500 disabled:opacity-50"
+              className="sr-only"
             />
           </label>
-          {uploading && <p className="text-sm text-slate-400">Uploading and profiling your dataset...</p>}
+          {uploading && (
+            <p role="status" className="flex items-center gap-2 text-sm text-slate-400">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-cyan-400" />
+              Uploading and profiling your dataset...
+            </p>
+          )}
           {error && <ErrorBanner message={error} />}
         </div>
       )}
+
+      {result && result.kind !== 'document' && activeTab === 'recommendations' && (
+        <RecommendationEngine datasetId={result.dataset_id} columns={result.columns ?? []} />
+      )}
+
+      {activeTab === 'meeting' && <MeetingIntelligence />}
+
+      {activeTab === 'email' && <EmailGenerator />}
+
+      {activeTab === 'monitoring' && <LiveMonitoring />}
+
+      {activeTab === 'audit-logs' && <AuditLogs />}
 
       {/* ---------- Profile tab ---------- */}
       {result && activeTab === 'profile' && result.kind === 'document' && (
@@ -3127,9 +3210,9 @@ export default function UploadDataset({
           <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4">
             <h3 className="font-medium text-white">AutoML - train and compare real models</h3>
             <p className="mt-1 text-sm text-slate-400">
-              Trains multiple real models (Logistic/Linear Regression, Random Forest, XGBoost, LightGBM),
-              cross-validates each, and picks the best by held-out test performance - with real SHAP
-              feature importance, not an AI guess.
+              Compares Logistic/Linear Regression, Decision Tree, Random Forest, SVM, KNN, XGBoost,
+              LightGBM, and CatBoost when installed. Models are cross-validated and ranked by held-out
+              performance.
             </p>
           </div>
 
@@ -3474,9 +3557,58 @@ export default function UploadDataset({
           <>
           <div className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-3">
             <p className="text-sm text-slate-400">
-              Finds natural groupings in the data with KMeans - the number of clusters is chosen
-              automatically (silhouette score). No target column needed.
+              {clusterAlgorithm === 'kmeans' && 'KMeans chooses a cluster count automatically using silhouette score.'}
+              {clusterAlgorithm === 'hierarchical' && 'Hierarchical clustering uses Ward linkage and chooses a cluster count automatically using silhouette score.'}
+              {clusterAlgorithm === 'dbscan' && 'DBSCAN groups nearby points using eps and minimum samples; eps uses standardized feature units, and points outside dense groups are reported as noise.'}
+              {' '}No target column needed.
             </p>
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="flex flex-col gap-1 text-xs text-slate-400">
+                Clustering algorithm
+                <select
+                  value={clusterAlgorithm}
+                  onChange={(event) => {
+                    const value = event.target.value
+                    if (value === 'kmeans' || value === 'dbscan' || value === 'hierarchical') {
+                      setClusterAlgorithm(value)
+                      setClusterResult(null)
+                      setClusterError(null)
+                    }
+                  }}
+                  className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+                >
+                  <option value="kmeans">KMeans</option>
+                  <option value="dbscan">DBSCAN</option>
+                  <option value="hierarchical">Hierarchical</option>
+                </select>
+              </label>
+              {clusterAlgorithm === 'dbscan' && (
+                <>
+                  <label className="flex flex-col gap-1 text-xs text-slate-400">
+                    Epsilon (eps)
+                    <input
+                      type="number"
+                      min="0.001"
+                      step="any"
+                      value={clusterDbscanEps}
+                      onChange={(event) => setClusterDbscanEps(Number(event.target.value))}
+                      className="w-32 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1 text-xs text-slate-400">
+                    Minimum samples
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={clusterDbscanMinSamples}
+                      onChange={(event) => setClusterDbscanMinSamples(Number(event.target.value))}
+                      className="w-32 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+                    />
+                  </label>
+                </>
+              )}
+            </div>
             <div className="flex flex-col gap-2">
               <label className="text-sm text-slate-400">
                 Feature columns (leave all unchecked to use every numeric column):
@@ -3507,7 +3639,14 @@ export default function UploadDataset({
             </div>
             <button
               onClick={handleRunClustering}
-              disabled={clustering}
+              disabled={
+                clustering ||
+                (clusterAlgorithm === 'dbscan' &&
+                  (!Number.isFinite(clusterDbscanEps) ||
+                    clusterDbscanEps <= 0 ||
+                    !Number.isInteger(clusterDbscanMinSamples) ||
+                    clusterDbscanMinSamples < 1))
+              }
               className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
             >
               {clustering ? 'Clustering...' : 'Run clustering'}
@@ -3518,9 +3657,25 @@ export default function UploadDataset({
 
           {clusterResult && (
             <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-5">
+                <Stat
+                  label="Algorithm"
+                  value={
+                    clusterResult.algorithm === 'dbscan'
+                      ? 'DBSCAN'
+                      : clusterResult.algorithm === 'hierarchical'
+                        ? 'Hierarchical'
+                        : 'KMeans'
+                  }
+                  isText
+                />
                 <Stat label="Clusters found" value={clusterResult.n_clusters} />
-                <Stat label="Silhouette score" value={clusterResult.silhouette_score} />
+                <Stat
+                  label={clusterResult.algorithm === 'dbscan' ? 'Silhouette (non-noise)' : 'Silhouette score'}
+                  value={clusterResult.silhouette_score ?? 'n/a'}
+                  isText={clusterResult.silhouette_score === null}
+                />
+                <Stat label="Noise points" value={clusterResult.noise_count} />
                 <Stat label="Features used" value={clusterResult.feature_columns.length} />
               </div>
 
@@ -3540,7 +3695,9 @@ export default function UploadDataset({
                   <tbody>
                     {Object.entries(clusterResult.cluster_profiles).map(([clusterId, profile]) => (
                       <tr key={clusterId} className="border-t border-slate-800">
-                        <td className="p-2 font-medium text-slate-200">Cluster {clusterId}</td>
+                        <td className="p-2 font-medium text-slate-200">
+                          {clusterId === '-1' ? 'Noise' : `Cluster ${clusterId}`}
+                        </td>
                         <td className="p-2 text-slate-300">{clusterResult.cluster_sizes[clusterId]}</td>
                         {clusterResult.feature_columns.map((col) => (
                           <td key={col} className="p-2 text-slate-400">
@@ -4655,6 +4812,8 @@ export default function UploadDataset({
         </div>
       )}
 
+        </div>
+      </div>
       <SourceDrawer source={activeSource} onClose={() => setActiveSource(null)} />
     </section>
   )
