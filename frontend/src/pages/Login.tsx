@@ -8,6 +8,7 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [oauthLoading, setOauthLoading] = useState<'google' | 'github' | null>(null)
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -35,6 +36,23 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
       setError(requestError instanceof Error ? requestError.message : 'Authentication request failed.')
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function handleOAuthSignIn(provider: 'google' | 'github') {
+    setError(null)
+    setNotice(null)
+    setOauthLoading(provider)
+
+    try {
+      const { error: oauthError } = await supabase.auth.signInWithOAuth({
+        provider,
+        options: { redirectTo: window.location.origin },
+      })
+      if (oauthError) throw oauthError
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Social sign-in failed.')
+      setOauthLoading(null)
     }
   }
 
@@ -111,6 +129,36 @@ export default function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
                     : 'Create an account to set up your Nexus AI workspace.'}
               </p>
             </div>
+
+            {!isForgotPassword && (
+              <div className="space-y-3">
+                <button
+                  type="button"
+                  disabled={loading || oauthLoading !== null}
+                  onClick={() => void handleOAuthSignIn('google')}
+                  className="flex w-full items-center justify-center gap-3 rounded-xl border border-slate-700/80 bg-white px-4 py-3 text-sm font-semibold text-slate-800 transition hover:bg-slate-100 disabled:cursor-wait disabled:opacity-60"
+                >
+                  <svg viewBox="0 0 48 48" className="h-5 w-5" aria-hidden="true">
+                    <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5Z" transform="translate(0 5)" />
+                    <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.75 7.18l7.73 6C44.43 38.12 46.98 31.95 46.98 24.55Z" />
+                    <path fill="#FBBC05" d="M10.53 28.59a14.4 14.4 0 0 1 0-9.18l-7.98-6.19a23.9 23.9 0 0 0 0 21.56l7.98-6.19Z" transform="translate(0 5)" />
+                    <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.91-5.8l-7.73-6c-2.14 1.44-4.88 2.3-8.18 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48Z" transform="translate(0 -5)" />
+                  </svg>
+                  {oauthLoading === 'google' ? 'Connecting to Google...' : 'Continue with Google'}
+                </button>
+                <button
+                  type="button"
+                  disabled={loading || oauthLoading !== null}
+                  onClick={() => void handleOAuthSignIn('github')}
+                  className="flex w-full items-center justify-center gap-3 rounded-xl border border-slate-700/80 bg-[#161b22] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#22272e] disabled:cursor-wait disabled:opacity-60"
+                >
+                  <svg viewBox="0 0 24 24" className="h-5 w-5 fill-current" aria-hidden="true">
+                    <path d="M12 .9a11.1 11.1 0 0 0-3.51 21.63c.56.1.76-.24.76-.54v-2.08c-3.1.67-3.76-1.32-3.76-1.32-.5-1.28-1.24-1.62-1.24-1.62-1.02-.7.08-.69.08-.69 1.13.08 1.73 1.16 1.73 1.16 1 .1.76 2.3 3.87 1.63.1-.73.4-1.23.7-1.52-2.48-.28-5.09-1.24-5.09-5.52 0-1.22.44-2.22 1.16-3-.12-.29-.5-1.43.11-2.98 0 0 .95-.3 3.05 1.15a10.6 10.6 0 0 1 5.55 0c2.1-1.43 3.05-1.15 3.05-1.15.61 1.55.23 2.7.11 2.98.72.78 1.16 1.78 1.16 3 0 4.29-2.61 5.23-5.1 5.51.4.35.76 1.03.76 2.08v3.08c0 .3.2.65.77.54A11.1 11.1 0 0 0 12 .9Z" />
+                  </svg>
+                  {oauthLoading === 'github' ? 'Connecting to GitHub...' : 'Continue with GitHub'}
+                </button>
+              </div>
+            )}
 
             <div className="space-y-4">
               <div className="space-y-2">
