@@ -6,9 +6,13 @@ import asyncio
 import logging
 import math
 import re
+import smtplib
+import ssl
+from email.message import EmailMessage
 from datetime import datetime, timezone
 from typing import Any
 
+from app.config import settings
 from app.supabase_client import supabase_admin
 
 logger = logging.getLogger(__name__)
@@ -157,6 +161,27 @@ def acknowledge_alert(alert_id: str, user_id: str) -> dict[str, Any] | None:
     return result.data[0] if result.data else None
 
 
+def _send_alert_email(user_id: str, rule_name: str, message_text: str) -> None:
+    user_response = supabase_admin.auth.admin.get_user_by_id(user_id)
+    auth_user = getattr(user_response, "user", None)
+    recipient = getattr(auth_user, "email", None)
+    if not recipient:
+        raise ValueError("The account has no email address for alert delivery.")
+
+    message = EmailMessage()
+    message["From"] = settings.smtp_from_email
+    message["To"] = recipient
+    message["Subject"] = f"Nexus AI alert: {rule_name}"
+    message.set_content(message_text)
+
+    with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as client:
+        client.ehlo()
+        client.starttls(context=ssl.create_default_context())
+        client.ehlo()
+        client.login(settings.smtp_username, settings.smtp_password)
+        client.send_message(message)
+
+
 def evaluate_rule(rule: dict[str, Any], value: float | None = None) -> dict[str, Any]:
     if value is None:
         value = read_metric_value(rule["source_table"], rule["metric_column"], rule["user_id"])
@@ -179,8 +204,13 @@ def evaluate_rule(rule: dict[str, Any], value: float | None = None) -> dict[str,
                 f"{'at or above' if rule['comparison'] == 'above' else 'at or below'} "
                 f"the threshold {threshold:g}."
             ),
+            "email_status": "pending" if rule.get("email_enabled") else "not_requested",
         }
-        _execute_storage(lambda: supabase_admin.table(ALERTS_TABLE).insert(alert).execute())
+        inserted_alerts = _execute_storage(
+            lambda: supabase_admin.table(ALERTS_TABLE).insert(alert).execute()
+        ).data or []
+        if not inserted_alerts:
+            raise MonitoringStorageError("Monitoring alert was not saved.")
 
     update = {
         "last_value": value,
@@ -196,6 +226,29 @@ def evaluate_rule(rule: dict[str, Any], value: float | None = None) -> dict[str,
             .execute()
         )
     )
+
+    if triggered and not was_triggered and rule.get("email_enabled"):
+        alert_id = inserted_alerts[0].get("id")
+        if not alert_id:
+            raise MonitoringStorageError("Saved alert did not return an ID for email delivery tracking.")
+        try:
+            _send_alert_email(rule["user_id"], rule["name"], alert["message"])
+        except Exception:
+            email_status = "failed"
+            logger.exception("Could not deliver monitoring alert email for rule %s", rule.get("id"))
+        else:
+            email_status = "sent"
+
+        _execute_storage(
+            lambda: (
+                supabase_admin.table(ALERTS_TABLE)
+                .update({"email_status": email_status})
+                .eq("id", alert_id)
+                .eq("user_id", rule["user_id"])
+                .execute()
+            )
+        )
+
     return {**rule, **update}
 
 
