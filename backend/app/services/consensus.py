@@ -4,8 +4,8 @@
         |
    +----+----+
    |    |    |
-   v    v    v
- Groq Nemotron MiniMax-M3  <- called in PARALLEL in full consensus mode
+   v    v       v
+ Groq Nemotron 3.5 Gemma 4 26B          <- called in PARALLEL in full consensus mode
    |    |    |                (or fast-path cascading in tier="fast" mode)
    +----+----+
         v
@@ -54,17 +54,14 @@ from sklearn.metrics.pairwise import cosine_similarity
 from app.config import settings
 
 GROQ_MODEL_NAME = "openai/gpt-oss-120b"
-NVIDIA_MODEL_NAME = "nvidia/nemotron-3-super-120b-a12b"
-# Also served via NVIDIA's build.nvidia.com catalog, so this reuses the
-# same NVIDIA client/API key as NVIDIA_MODEL_NAME above - just a different
-# model string on the same OpenAI-compatible endpoint.
-MINIMAX_MODEL_NAME = "minimaxai/minimax-m3"
+NVIDIA_MODEL_NAME = "nvidia/nemotron-3.5-super-vl-120b-a12b"
+GEMMA_MODEL_NAME = "google/gemma-4-26b-a4b-it:free"
 
 # Relative trust weights used to rank answers and weigh confidence. Not a
 # benchmark score - just this project's judgment on whose answer to lean on
 # more heavily when models disagree. Must sum to 1.0.
 MODEL_WEIGHTS = {
-    "minimax": 0.40,
+    "gemma": 0.40,
     "nvidia": 0.35,
     "groq": 0.25,
 }
@@ -91,8 +88,29 @@ def _nvidia_client() -> OpenAI:
     return OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=settings.nvidia_api_key, timeout=20, max_retries=0)
 
 
-def _minimax_client() -> OpenAI:
-    return OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=settings.nvidia_api_key, timeout=20, max_retries=0)
+def _gemma_client() -> OpenAI:
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=settings.openrouter_api_key,
+        timeout=15,
+        max_retries=0,
+    )
+
+
+def _response_text(completion, provider: str) -> str:
+    choices = getattr(completion, "choices", None)
+    if not choices:
+        raise ValueError(f"{provider} returned no choices")
+
+    choice = choices[0]
+    message = getattr(choice, "message", None)
+    content = getattr(message, "content", None)
+    if not isinstance(content, str) or not content.strip():
+        finish_reason = getattr(choice, "finish_reason", None)
+        detail = f" (finish_reason={finish_reason})" if finish_reason else ""
+        raise ValueError(f"{provider} returned no text content{detail}")
+
+    return content.strip()
 
 
 def _call_groq(prompt: str, temperature: float, max_tokens: int) -> str:
@@ -102,54 +120,51 @@ def _call_groq(prompt: str, temperature: float, max_tokens: int) -> str:
         temperature=temperature,
         max_tokens=max_tokens,
     )
-    return completion.choices[0].message.content.strip()
+    return _response_text(completion, "Groq")
 
 
 def _call_nvidia(prompt: str, temperature: float, max_tokens: int) -> str:
-    completion = _nvidia_client().chat.completions.create(
-        model=NVIDIA_MODEL_NAME,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=temperature,
-        top_p=0.95,
-        max_tokens=max_tokens,
-    )
-    return completion.choices[0].message.content.strip()
+    client = _nvidia_client()
+
+    def request(token_limit: int):
+        return client.chat.completions.create(
+            model=NVIDIA_MODEL_NAME,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
+            top_p=0.95,
+            max_tokens=token_limit,
+        )
+
+    completion = request(max_tokens)
+    try:
+        return _response_text(completion, "NVIDIA")
+    except ValueError as error:
+        if max_tokens >= 512 or "finish_reason=length" not in str(error):
+            raise
+
+    return _response_text(request(512), "NVIDIA")
 
 
-def _call_minimax(prompt: str, temperature: float, max_tokens: int) -> str:
-    # NVIDIA and MiniMax share ONE account/API key (see _minimax_client
-    # above) and _query_all_models fires both at the exact same instant
-    # via the thread pool - guaranteeing a 2x burst against that single
-    # account's rate limit on every full-tier consensus call, before any
-    # retry logic even gets a chance to react. This small proactive delay
-    # staggers minimax's actual network call away from nvidia's, cutting
-    # down how often they collide in the first place - a cheaper fix than
-    # only reacting to the 429 after it's already happened (which
-    # _call_with_retry still also does, as a second line of defense).
-    time.sleep(0.3)
-    completion = _minimax_client().chat.completions.create(
-        model=MINIMAX_MODEL_NAME,
+def _call_gemma(prompt: str, temperature: float, max_tokens: int) -> str:
+    completion = _gemma_client().chat.completions.create(
+        model=GEMMA_MODEL_NAME,
         messages=[{"role": "user", "content": prompt}],
         temperature=min(temperature, 1.0),
         max_tokens=max_tokens,
     )
-    return completion.choices[0].message.content.strip()
+    return _response_text(completion, "Gemma")
 
 
 _PROVIDERS = {
     "groq": _call_groq,
     "nvidia": _call_nvidia,
-    "minimax": _call_minimax,
+    "gemma": _call_gemma,
 }
 
-# nvidia and minimax are both served through the SAME NVIDIA API key/account
-# (see _minimax_client's docstring above) and get fired at the exact same
-# instant by the thread pool below - that doubles the burst load against one
-# account's rate limit every single consensus call, which is what was
-# actually causing the frequent "429 Too Many Requests" / "Request timed
-# out" failures for minimax. A small retry-with-backoff naturally destaggers
-# the retry away from that same-instant collision, without needing to move
-# minimax to a different provider/account.
+# Keep the free OpenRouter tier to one attempt so provider throttling does
+# not hold the consensus response open for repeated timeout windows.
+_PROVIDER_RETRIES = {"groq": 1, "nvidia": 1, "gemma": 0}
+
 _RETRYABLE_MARKERS = ("429", "too many requests", "timed out", "timeout", "rate limit")
 
 
@@ -169,7 +184,7 @@ def _call_with_retry(fn, prompt: str, temperature: float, max_tokens: int, *, re
 
 
 # Stable display/tie-break order, independent of which finishes first.
-_ORDER = {"minimax": 0, "nvidia": 1, "groq": 2}
+_ORDER = {"gemma": 0, "nvidia": 1, "groq": 2}
 
 
 @dataclass
@@ -221,14 +236,20 @@ class ConsensusResult:
 # ---------------------------------------------------------------------------
 
 def _query_all_models(prompt: str, temperature: float, max_tokens: int) -> list[ModelAnswer]:
-    """Calls Groq, NVIDIA, and MiniMax-M3 at the same time via a thread pool -
-    this is the "User Query -> Groq / Nemotron / MiniMax-M3" fan-out in the
-    diagram. A model that raises doesn't block the others; it's recorded
-    as a failed ModelAnswer instead."""
+    """Calls Groq, NVIDIA, and OpenRouter-hosted Gemma at the same time via
+    a thread pool. A model that raises doesn't block the others; it's
+    recorded as a failed ModelAnswer instead."""
     answers: list[ModelAnswer] = []
     with ThreadPoolExecutor(max_workers=3) as pool:
         future_to_name = {
-            pool.submit(_call_with_retry, fn, prompt, temperature, max_tokens): name
+            pool.submit(
+                _call_with_retry,
+                fn,
+                prompt,
+                temperature,
+                max_tokens,
+                retries=_PROVIDER_RETRIES[name],
+            ): name
             for name, fn in _PROVIDERS.items()
         }
         for future in as_completed(future_to_name):
@@ -248,15 +269,17 @@ def _query_all_models(prompt: str, temperature: float, max_tokens: int) -> list[
 # ---------------------------------------------------------------------------
 
 def _query_fast_tier(prompt: str, temperature: float, max_tokens: int) -> ConsensusResult:
-    """Fast-path tier: queries Groq first (~300ms), falling back to NVIDIA/MiniMax
+    """Fast-path tier: queries Groq first (~300ms), falling back to NVIDIA/Gemma
     only if Groq encounters a failure."""
-    order = ["groq", "nvidia", "minimax"]
+    order = ["groq", "nvidia", "gemma"]
     errors: list[str] = []
 
     for name in order:
         fn = _PROVIDERS[name]
         try:
-            text = _call_with_retry(fn, prompt, temperature, max_tokens, retries=1)
+            text = _call_with_retry(
+                fn, prompt, temperature, max_tokens, retries=_PROVIDER_RETRIES[name]
+            )
             model_ans = ModelAnswer(name=name, weight=MODEL_WEIGHTS[name], text=text)
             return ConsensusResult(
                 answer=text,
@@ -423,9 +446,9 @@ def get_consensus(
     """Runs the Hybrid Consensus Engine pipeline:
 
         if tier == "fast":
-            runs single-provider cascade (Groq -> NVIDIA -> MiniMax)
+            runs single-provider cascade (Groq -> NVIDIA -> Gemma)
         else (tier == "full"):
-            query Groq + NVIDIA + MiniMax-M3 in parallel
+            query Groq + NVIDIA Nemotron + OpenRouter-hosted Gemma in parallel
               -> agreement_detection
               -> contradiction_detection
               -> answer_ranking
@@ -442,7 +465,7 @@ def get_consensus(
 
     if not ok_answers:
         errors = " | ".join(f"{a.name}: {a.error}" for a in answers)
-        raise RuntimeError(f"All model providers failed (Groq, NVIDIA, MiniMax-M3). {errors}")
+        raise RuntimeError(f"All model providers failed (Groq, NVIDIA Nemotron, Gemma). {errors}")
 
     sim_matrix, agreement_score = agreement_detection(ok_answers)
     contradictions = contradiction_detection(ok_answers, sim_matrix)
