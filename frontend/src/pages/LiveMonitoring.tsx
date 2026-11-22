@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiFetch } from '../lib/api'
 
 interface MonitorRule {
@@ -8,6 +8,7 @@ interface MonitorRule {
   metric_column: string
   comparison: 'above' | 'below'
   threshold: number
+  email_enabled: boolean
   last_value: number | null
   last_checked_at: string | null
   is_triggered: boolean
@@ -22,6 +23,7 @@ interface MonitorAlert {
   threshold: number
   comparison: 'above' | 'below'
   message: string
+  email_status: 'not_requested' | 'pending' | 'sent' | 'failed'
   created_at: string
   acknowledged_at: string | null
 }
@@ -40,12 +42,18 @@ export default function LiveMonitoring() {
   const [metricColumn, setMetricColumn] = useState('')
   const [comparison, setComparison] = useState<'above' | 'below'>('above')
   const [threshold, setThreshold] = useState('')
+  const [emailEnabled, setEmailEnabled] = useState(false)
   const [preview, setPreview] = useState<MonitorPreview | null>(null)
   const [rules, setRules] = useState<MonitorRule[]>([])
   const [alerts, setAlerts] = useState<MonitorAlert[]>([])
+  const [browserPermission, setBrowserPermission] = useState<NotificationPermission | 'unsupported'>(
+    typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
+  )
   const [running, setRunning] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const hasLoadedAlerts = useRef(false)
+  const seenAlertIds = useRef(new Set<string>())
 
   const loadMonitoringData = useCallback(async () => {
     try {
@@ -54,7 +62,21 @@ export default function LiveMonitoring() {
         apiFetch('/monitoring/alerts'),
       ])
       setRules((rulesResponse as { rules: MonitorRule[] }).rules)
-      setAlerts((alertsResponse as { alerts: MonitorAlert[] }).alerts)
+      const nextAlerts = (alertsResponse as { alerts: MonitorAlert[] }).alerts
+      if (hasLoadedAlerts.current && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        for (const alert of nextAlerts) {
+          if (!seenAlertIds.current.has(alert.id)) {
+            const notification = new Notification(`Nexus AI alert: ${alert.rule_name}`, {
+              body: alert.message,
+              tag: alert.id,
+            })
+            notification.onclick = () => window.focus()
+          }
+        }
+      }
+      for (const alert of nextAlerts) seenAlertIds.current.add(alert.id)
+      hasLoadedAlerts.current = true
+      setAlerts(nextAlerts)
       setError(null)
     } catch (requestError) {
       setError((requestError as Error).message)
@@ -96,6 +118,22 @@ export default function LiveMonitoring() {
     }
   }
 
+  async function enableBrowserNotifications() {
+    if (typeof Notification === 'undefined') {
+      setBrowserPermission('unsupported')
+      setError('This browser does not support desktop notifications.')
+      return
+    }
+
+    try {
+      const permission = await Notification.requestPermission()
+      setBrowserPermission(permission)
+      setError(permission === 'granted' ? null : 'Browser notification permission was not granted.')
+    } catch (requestError) {
+      setError((requestError as Error).message)
+    }
+  }
+
   async function createMonitor(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setRunning(true)
@@ -109,10 +147,12 @@ export default function LiveMonitoring() {
           metric_column: metricColumn.trim(),
           comparison,
           threshold: Number(threshold),
+          email_enabled: emailEnabled,
         }),
       })
       setName('')
       setThreshold('')
+      setEmailEnabled(false)
       setPreview(null)
       await loadMonitoringData()
     } catch (requestError) {
@@ -236,6 +276,21 @@ export default function LiveMonitoring() {
           </label>
         </div>
 
+        <label className="flex items-start gap-2 text-sm text-slate-300">
+          <input
+            type="checkbox"
+            checked={emailEnabled}
+            onChange={(event) => setEmailEnabled(event.target.checked)}
+            className="mt-1 accent-blue-500"
+          />
+          <span>
+            Also email me at my account address when this alert fires.
+            <span className="mt-1 block text-xs text-slate-500">
+              Requires SMTP settings on the backend; email delivery is attempted once per threshold crossing.
+            </span>
+          </span>
+        </label>
+
         <button
           type="submit"
           disabled={
@@ -261,6 +316,7 @@ export default function LiveMonitoring() {
               <p className="mt-1 text-xs text-slate-500">
                 {rule.source_table}.{rule.metric_column} {rule.comparison === 'above' ? '≥' : '≤'} {rule.threshold}
                 {' · Current: '}{rule.last_value ?? 'not checked'}
+                {rule.email_enabled ? ' · Email enabled' : ''}
               </p>
               {rule.last_checked_at && (
                 <p className="mt-1 text-xs text-slate-600">Checked {new Date(rule.last_checked_at).toLocaleString()}</p>
@@ -283,7 +339,19 @@ export default function LiveMonitoring() {
       </section>
 
       <section className="nexus-surface space-y-3 p-5">
-        <h4 className="font-medium text-white">In-app alerts ({alerts.length})</h4>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h4 className="font-medium text-white">In-app alerts ({alerts.length})</h4>
+          {browserPermission !== 'unsupported' && (
+            <button
+              type="button"
+              onClick={() => void enableBrowserNotifications()}
+              disabled={browserPermission === 'granted'}
+              className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-200 transition hover:bg-slate-800 disabled:cursor-default disabled:opacity-60"
+            >
+              {browserPermission === 'granted' ? 'Browser notifications enabled' : 'Enable browser notifications'}
+            </button>
+          )}
+        </div>
         {alerts.length === 0 && <p className="text-sm text-slate-500">No alerts yet.</p>}
         {alerts.map((alert) => (
           <article key={alert.id} className={`rounded-lg border p-3 ${alert.acknowledged_at ? 'border-slate-800 bg-slate-900/40' : 'border-amber-700/50 bg-amber-950/20'}`}>
@@ -292,6 +360,11 @@ export default function LiveMonitoring() {
                 <p className="text-sm font-medium text-slate-200">{alert.rule_name}</p>
                 <p className="mt-1 text-sm text-slate-300">{alert.message}</p>
                 <p className="mt-1 text-xs text-slate-500">{new Date(alert.created_at).toLocaleString()}</p>
+                {alert.email_status !== 'not_requested' && (
+                  <p className="mt-1 text-xs text-slate-500">
+                    Email: {alert.email_status === 'sent' ? 'sent' : alert.email_status === 'failed' ? 'failed' : 'sending'}
+                  </p>
+                )}
               </div>
               {!alert.acknowledged_at && (
                 <button
