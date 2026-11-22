@@ -12,3 +12,4 @@ frontend/.env
 # general
 .DS_Store
 *.log
+*.csv
