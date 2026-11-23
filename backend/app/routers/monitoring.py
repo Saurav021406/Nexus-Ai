@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
+from app.config import settings
 from app.deps import get_current_user
 from app.services import monitoring
 
@@ -23,6 +24,7 @@ class MonitorCreateRequest(MonitorPreviewRequest):
     name: str = Field(min_length=1, max_length=100)
     comparison: Literal["above", "below"]
     threshold: float = Field(allow_inf_nan=False)
+    email_enabled: bool = False
 
 
 def _raise_monitoring_error(error: Exception) -> None:
@@ -58,6 +60,14 @@ async def preview_monitor_source(payload: MonitorPreviewRequest, user=Depends(ge
 
 @router.post("/rules")
 async def create_monitor_rule(payload: MonitorCreateRequest, user=Depends(get_current_user)):
+    if payload.email_enabled and not settings.smtp_configured:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Email alerts are not configured. Set SMTP_HOST, SMTP_USERNAME, "
+                "SMTP_PASSWORD, and SMTP_FROM_EMAIL on the backend."
+            ),
+        )
     try:
         current_value = await run_in_threadpool(
             monitoring.read_metric_value,
