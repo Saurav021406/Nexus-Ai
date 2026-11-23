@@ -7,17 +7,15 @@ agent runtime"):
   2. NVIDIA   - secondary (this project's original primary - kept as the
                             first fallback rather than dropped, since it's
                             proven reliable in the rest of the codebase)
-  3. MiniMax  - tertiary  (minimaxai/minimax-m3, served via the same
-                            NVIDIA build.nvidia.com catalog/API key as the
-                            NVIDIA tier above - replaces the old
-                            OpenRouter-routed Claude fallback)
+  3. Gemma    - tertiary  (Google Gemma 4 31B IT, served via NVIDIA NIM and
+                            the existing NVIDIA API key)
 
 All three expose OpenAI-compatible chat completions endpoints, so all three
 go through the SDK's own `OpenAIChatCompletionsModel` - no custom low-level
 Model implementation needed for any of them, which keeps this low-risk.
 
 Design note: this file deliberately stays a FALLBACK chain, not the
-parallel Groq+NVIDIA+MiniMax "Consensus Engine" used elsewhere in this app
+parallel Groq+NVIDIA+Gemma "Consensus Engine" used elsewhere in this app
 (see app/services/consensus.py). The Agents SDK's `Model` interface has to
 return one coherent set of tool-calls/handoffs/structured output per turn -
 three models could each choose to call different tools, so there's no sane
@@ -60,8 +58,8 @@ from app.config import settings
 set_tracing_disabled(True)
 
 GROQ_MODEL_NAME ="openai/gpt-oss-120b"
-NVIDIA_MODEL_NAME = "nvidia/nemotron-3-super-120b-a12b"
-MINIMAX_MODEL_NAME = "minimaxai/minimax-m3"
+NVIDIA_MODEL_NAME = "nvidia/nemotron-3.5-super-vl-120b-a12b"
+GEMMA_MODEL_NAME = "google/gemma-4-31b-it"
 
 
 def _build_groq_model() -> OpenAIChatCompletionsModel:
@@ -82,17 +80,17 @@ def _build_nvidia_model() -> OpenAIChatCompletionsModel:
     return OpenAIChatCompletionsModel(model=NVIDIA_MODEL_NAME, openai_client=client)
 
 
-def _build_minimax_model() -> OpenAIChatCompletionsModel:
+def _build_gemma_model() -> OpenAIChatCompletionsModel:
     client = AsyncOpenAI(
         base_url="https://integrate.api.nvidia.com/v1",
         api_key=settings.nvidia_api_key,
         timeout=20,
     )
-    return OpenAIChatCompletionsModel(model=MINIMAX_MODEL_NAME, openai_client=client)
+    return OpenAIChatCompletionsModel(model=GEMMA_MODEL_NAME, openai_client=client)
 
 
 class FallbackModel(Model):
-    """Tries Groq, then NVIDIA, then MiniMax-M3, in that order. Each tier
+    """Tries Groq, then NVIDIA Nemotron, then Gemma, in that order. Each tier
     only gets called if every prior tier raised - a slow primary doesn't
     delay things further by also being retried, it just fails fast onto
     the next tier.
@@ -107,7 +105,7 @@ class FallbackModel(Model):
         self._tiers = [
             ("Groq", _build_groq_model),
             ("NVIDIA", _build_nvidia_model),
-            ("MiniMax", _build_minimax_model),
+            ("Gemma", _build_gemma_model),
         ]
 
     async def get_response(
@@ -145,7 +143,7 @@ class FallbackModel(Model):
                 errors.append(f"{tier_name}: {e}")
 
         raise RuntimeError(
-            "All model providers failed (Groq -> NVIDIA -> MiniMax-M3). " + " | ".join(errors)
+            "All model providers failed (Groq -> NVIDIA Nemotron -> Gemma). " + " | ".join(errors)
         )
 
     def stream_response(
