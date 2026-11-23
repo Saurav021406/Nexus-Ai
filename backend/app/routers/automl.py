@@ -7,7 +7,7 @@
                              model, using the exact preprocessing it was
                              trained with (see services/automl.py's
                              FeatureTransformer)
-    POST /automl/cluster -> real KMeans clustering with automatic k selection
+    POST /automl/cluster -> real KMeans, DBSCAN, or hierarchical clustering
     POST /automl/predict/csv -> batch predictions from an uploaded CSV,
                              downloaded back as a CSV with prediction
                              (and probability) columns appended
@@ -23,11 +23,12 @@ it's just applying an already-fitted pipeline to a handful of new rows.
 from __future__ import annotations
 
 import io
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import pandas as pd
 
 from app.deps import get_current_user
@@ -44,6 +45,7 @@ class AutoMLRunRequest(BaseModel):
     dataset_id: str
     target_column: str
     problem_type: str | None = None  # "classification" | "regression" | None (auto-detect)
+    tune_hyperparameters: bool = False
 
 
 class AutoMLPredictRequest(BaseModel):
@@ -55,6 +57,9 @@ class AutoMLPredictRequest(BaseModel):
 class AutoMLClusterRequest(BaseModel):
     dataset_id: str
     feature_columns: list[str] | None = None  # None = use all numeric columns
+    algorithm: Literal["kmeans", "dbscan", "hierarchical"] = "kmeans"
+    eps: float = Field(default=0.5, gt=0)
+    min_samples: int = Field(default=5, ge=1)
 
 
 class AutoMLAnomalyRequest(BaseModel):
@@ -63,12 +68,21 @@ class AutoMLAnomalyRequest(BaseModel):
     contamination: float = 0.05  # expected proportion of anomalies
 
 
-def _run_automl(dataset_id: str, user_id: str, target_column: str, problem_type: str | None) -> dict:
+def _run_automl(
+    dataset_id: str,
+    user_id: str,
+    target_column: str,
+    problem_type: str | None,
+    tune_hyperparameters: bool = False,
+) -> dict:
     dataframe = get_dataset_dataframe(dataset_id, user_id)
 
     try:
         result, fitted_model, X_test, feature_names, transformer = automl.train_and_compare(
-            dataframe, target_column, problem_type=problem_type
+            dataframe,
+            target_column,
+            problem_type=problem_type,
+            tune_hyperparameters=tune_hyperparameters,
         )
     except ValueError as e:
         # Bad input (unknown column, too few rows, etc.) - this is the
@@ -101,6 +115,7 @@ def _run_automl(dataset_id: str, user_id: str, target_column: str, problem_type:
         "n_rows_used": result.n_rows_used,
         "n_rows_dropped": result.n_rows_dropped,
         "primary_metric": result.primary_metric,
+        "tuning_enabled": tune_hyperparameters,
         "best_model_name": result.best_model_name,
         "model_id": result.model_id,
         "models": [
@@ -166,7 +181,14 @@ async def list_automl_versions(dataset_id: str, user=Depends(get_current_user)):
 
 @router.post("/run", dependencies=[Depends(rate_limit("automl_run", max_requests=5, window_seconds=60))])
 async def run_automl(payload: AutoMLRunRequest, user=Depends(get_current_user)):
-    return await run_in_threadpool(_run_automl, payload.dataset_id, user.id, payload.target_column, payload.problem_type)
+    return await run_in_threadpool(
+        _run_automl,
+        payload.dataset_id,
+        user.id,
+        payload.target_column,
+        payload.problem_type,
+        payload.tune_hyperparameters,
+    )
 
 
 @router.post("/predict")
@@ -253,7 +275,13 @@ async def run_clustering(payload: AutoMLClusterRequest, user=Depends(get_current
     def _run():
         dataframe = get_dataset_dataframe(payload.dataset_id, user.id)
         try:
-            return automl.cluster_dataset(dataframe, feature_columns=payload.feature_columns)
+            return automl.cluster_dataset(
+                dataframe,
+                feature_columns=payload.feature_columns,
+                algorithm=payload.algorithm,
+                eps=payload.eps,
+                min_samples=payload.min_samples,
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
