@@ -5,7 +5,7 @@ explicitly only ever REASONED about "is this dataset ready for modeling"
 via an LLM, and never trained anything (see that file's own docstring:
 "Do NOT implement the complete Phase 5 AutoML engine here"). This module
 is that engine: genuine model training, cross-validation, and SHAP
-explainability, using actual scikit-learn/XGBoost/LightGBM code - not an
+explainability, using actual scikit-learn/XGBoost/LightGBM/CatBoost code - not an
 LLM guessing at plausible-sounding numbers.
 
     dataset + target column
@@ -58,9 +58,18 @@ from sklearn.metrics import (
     root_mean_squared_error,
 )
 from sklearn.model_selection import KFold, StratifiedKFold, cross_val_score, train_test_split
+from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
+from sklearn.svm import SVC, SVR
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
 from app.services.consensus import get_consensus_json
+
+try:
+    from catboost import CatBoostClassifier, CatBoostRegressor
+    _HAS_CATBOOST = True
+except (ImportError, OSError):
+    _HAS_CATBOOST = False
 
 # XGBoost/LightGBM are optional at import time so a missing/broken native
 # build degrades to "fewer candidate models" rather than crashing AutoML
@@ -366,9 +375,23 @@ def _build_feature_matrix(
 
 def _candidate_model_names(problem_type: str) -> list[str]:
     if problem_type == "classification":
-        names = ["Logistic Regression", "Random Forest"]
+        names = [
+            "Logistic Regression",
+            "Decision Tree",
+            "Random Forest",
+            "Support Vector Machine",
+            "K-Nearest Neighbors",
+        ]
     else:
-        names = ["Linear Regression", "Random Forest"]
+        names = [
+            "Linear Regression",
+            "Decision Tree",
+            "Random Forest",
+            "Support Vector Machine",
+            "K-Nearest Neighbors",
+        ]
+    if _HAS_CATBOOST:
+        names.append("CatBoost")
     if _HAS_XGBOOST:
         names.append("XGBoost")
     if _HAS_LIGHTGBM:
@@ -401,6 +424,35 @@ def _build_model(
             params = {"n_estimators": 200, "random_state": RANDOM_STATE, "class_weight": class_weight}
             params.update(extra_params)
             return RandomForestClassifier(**params)
+        if name == "Decision Tree":
+            params = {"random_state": RANDOM_STATE, "class_weight": class_weight}
+            params.update(extra_params)
+            return DecisionTreeClassifier(**params)
+        if name == "Support Vector Machine":
+            params = {
+                "C": 1.0,
+                "kernel": "rbf",
+                "probability": True,
+                "random_state": RANDOM_STATE,
+                "class_weight": class_weight,
+            }
+            params.update(extra_params)
+            return SVC(**params)
+        if name == "K-Nearest Neighbors":
+            return KNeighborsClassifier(**extra_params)
+        if name == "CatBoost":
+            if not _HAS_CATBOOST:
+                raise ValueError("CatBoost is not installed in this environment.")
+            params: dict[str, Any] = {
+                "iterations": 200,
+                "random_seed": RANDOM_STATE,
+                "verbose": False,
+                "allow_writing_files": False,
+            }
+            if imbalanced:
+                params["auto_class_weights"] = "Balanced"
+            params.update(extra_params)
+            return CatBoostClassifier(**params)
         if name == "XGBoost":
             # XGBoost has no class_weight param - scale_pos_weight is its
             # equivalent, but only applies to strictly BINARY classification.
@@ -423,6 +475,25 @@ def _build_model(
             params = {"n_estimators": 200, "random_state": RANDOM_STATE}
             params.update(extra_params)
             return RandomForestRegressor(**params)
+        if name == "Decision Tree":
+            params = {"random_state": RANDOM_STATE}
+            params.update(extra_params)
+            return DecisionTreeRegressor(**params)
+        if name == "Support Vector Machine":
+            return SVR(**extra_params)
+        if name == "K-Nearest Neighbors":
+            return KNeighborsRegressor(**extra_params)
+        if name == "CatBoost":
+            if not _HAS_CATBOOST:
+                raise ValueError("CatBoost is not installed in this environment.")
+            params: dict[str, Any] = {
+                "iterations": 200,
+                "random_seed": RANDOM_STATE,
+                "verbose": False,
+                "allow_writing_files": False,
+            }
+            params.update(extra_params)
+            return CatBoostRegressor(**params)
         if name == "XGBoost":
             params = {"n_estimators": 200, "random_state": RANDOM_STATE, "verbosity": 0}
             params.update(extra_params)
@@ -442,7 +513,7 @@ def _candidate_models(problem_type: str, y_train: pd.Series | None = None, imbal
     }
 
 
-def _suggest_hyperparams(trial: Any, name: str) -> dict[str, Any]:
+def _suggest_hyperparams(trial: Any, name: str, max_neighbors: int = 25) -> dict[str, Any]:
     """Small, sensible search space per model type - not exhaustive, just
     enough to meaningfully beat the fixed defaults without turning a
     15-trial search into an all-day sweep. Linear Regression has nothing
@@ -470,6 +541,28 @@ def _suggest_hyperparams(trial: Any, name: str) -> dict[str, Any]:
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
             "num_leaves": trial.suggest_int("num_leaves", 15, 100),
         }
+    if name == "Decision Tree":
+        return {
+            "max_depth": trial.suggest_int("max_depth", 2, 20),
+            "min_samples_split": trial.suggest_int("min_samples_split", 2, 10),
+        }
+    if name == "Support Vector Machine":
+        return {
+            "C": trial.suggest_float("C", 1e-3, 1e2, log=True),
+            "gamma": trial.suggest_categorical("gamma", ["scale", "auto"]),
+        }
+    if name == "K-Nearest Neighbors":
+        return {
+            "n_neighbors": trial.suggest_int("n_neighbors", 1, max_neighbors),
+            "weights": trial.suggest_categorical("weights", ["uniform", "distance"]),
+            "p": trial.suggest_int("p", 1, 2),
+        }
+    if name == "CatBoost":
+        return {
+            "iterations": trial.suggest_int("iterations", 100, 300),
+            "depth": trial.suggest_int("depth", 3, 10),
+            "learning_rate": trial.suggest_float("learning_rate", 0.02, 0.3, log=True),
+        }
     return {}
 
 
@@ -489,11 +582,21 @@ def _tune_hyperparameters(
     all) for model types with nothing meaningful to search, or if optuna
     isn't installed - tuning is a bonus on top of a working default, not
     a hard requirement for AutoML to function."""
-    if not _HAS_OPTUNA or name not in ("Logistic Regression", "Random Forest", "XGBoost", "LightGBM"):
+    tunable_models = {
+        "Logistic Regression",
+        "Random Forest",
+        "XGBoost",
+        "LightGBM",
+        "Decision Tree",
+        "Support Vector Machine",
+        "K-Nearest Neighbors",
+        "CatBoost",
+    }
+    if not _HAS_OPTUNA or name not in tunable_models:
         return {}
 
     def objective(trial: Any) -> float:
-        params = _suggest_hyperparams(trial, name)
+        params = _suggest_hyperparams(trial, name, max_neighbors=max(1, min(25, len(X_train) // 2)))
         model = _build_model(name, problem_type, y_train, imbalanced=False, extra_params=params)
         scores = cross_val_score(model, X_train, y_train, cv=splitter, scoring=cv_metric)
         return float(scores.mean())
@@ -667,7 +770,7 @@ def train_and_compare(
     if is_imbalanced:
         result_warnings.append(
             f"The target is imbalanced (largest class is {class_imbalance['ratio']}x the smallest) - "
-            "models were trained with class_weight=\"balanced\" to compensate, but accuracy alone can "
+            "models that support class balancing were configured to compensate, but accuracy alone can "
             "still be misleading here; check precision/recall per class."
         )
     if best.fit_diagnosis == "overfitting":
@@ -716,12 +819,14 @@ def compute_shap_importance(model: Any, X_test: np.ndarray, feature_names: list[
         sample = X_test if len(X_test) <= 200 else X_test[np.random.default_rng(RANDOM_STATE).choice(len(X_test), 200, replace=False)]
 
         model_type = type(model).__name__
-        if any(name in model_type for name in ("RandomForest", "XGB", "LGBM")):
+        if any(name in model_type for name in ("RandomForest", "DecisionTree", "XGB", "LGBM", "CatBoost")):
             explainer = shap.TreeExplainer(model)
             shap_values = explainer.shap_values(sample)
-        else:
+        elif isinstance(model, (LogisticRegression, LinearRegression)):
             explainer = shap.LinearExplainer(model, sample)
             shap_values = explainer.shap_values(sample)
+        else:
+            return [], f"SHAP global feature importance is not supported for {model_type}."
 
         # SHAP's return shape varies by version and problem type:
         # - list of arrays (one per class, older SHAP / some multiclass cases)
@@ -787,14 +892,16 @@ def explain_single_prediction(
         model_type = type(model).__name__
         row_2d = X_row.reshape(1, -1)
 
-        if any(name in model_type for name in ("RandomForest", "XGB", "LGBM")):
+        if any(name in model_type for name in ("RandomForest", "DecisionTree", "XGB", "LGBM", "CatBoost")):
             explainer = shap.TreeExplainer(model)
             shap_values = explainer.shap_values(row_2d)
-        else:
+        elif isinstance(model, (LogisticRegression, LinearRegression)):
             if background_sample is None or len(background_sample) == 0:
                 return [], "No background data available to explain this linear model's prediction."
             explainer = shap.LinearExplainer(model, background_sample)
             shap_values = explainer.shap_values(row_2d)
+        else:
+            return [], f"SHAP prediction explanations are not supported for {model_type}."
 
         # Same shape variation as compute_shap_importance (list / 3D / 2D)
         # - for multi-class, explain the class the model actually predicted
@@ -983,15 +1090,46 @@ Respond ONLY in this exact JSON format, no extra text:
     return get_consensus_json(prompt, temperature=1, max_tokens=2048)
 
 
-def cluster_dataset(df: pd.DataFrame, feature_columns: list[str] | None = None, max_k: int = 8) -> dict:
-    """Minimal clustering path (no target column, no train/test split -
-    a genuinely different shape than train_and_compare above). Picks k
-    automatically via silhouette score across k=2..max_k, so the user
-    doesn't have to guess a cluster count."""
-    from sklearn.cluster import KMeans
+def cluster_dataset(
+    df: pd.DataFrame,
+    feature_columns: list[str] | None = None,
+    max_k: int = 8,
+    algorithm: str = "kmeans",
+    eps: float = 0.5,
+    min_samples: int = 5,
+) -> dict:
+    """Cluster numeric rows with KMeans, DBSCAN, or agglomerative clustering.
+
+    KMeans and agglomerative clustering choose k by silhouette score.
+    DBSCAN uses eps/min_samples and reports noise separately; its score is
+    computed only over non-noise rows when at least two clusters remain.
+    """
+    from sklearn.cluster import AgglomerativeClustering, DBSCAN, KMeans
     from sklearn.metrics import silhouette_score
 
-    numeric_df = df[feature_columns] if feature_columns else df.select_dtypes(include="number")
+    if algorithm not in {"kmeans", "dbscan", "hierarchical"}:
+        raise ValueError("Unsupported clustering algorithm. Use kmeans, dbscan, or hierarchical.")
+    if max_k < 2:
+        raise ValueError("max_k must be at least 2.")
+    if algorithm == "dbscan":
+        if not np.isfinite(eps) or eps <= 0:
+            raise ValueError("DBSCAN eps must be a positive number.")
+        if min_samples < 1:
+            raise ValueError("DBSCAN min_samples must be at least 1.")
+
+    if feature_columns:
+        missing_columns = [column for column in feature_columns if column not in df.columns]
+        if missing_columns:
+            raise ValueError(f"Unknown feature column(s): {', '.join(missing_columns)}.")
+        non_numeric_columns = [
+            column for column in feature_columns
+            if not pd.api.types.is_numeric_dtype(df[column])
+        ]
+        if non_numeric_columns:
+            raise ValueError(f"Clustering features must be numeric: {', '.join(non_numeric_columns)}.")
+        numeric_df = df[feature_columns]
+    else:
+        numeric_df = df.select_dtypes(include="number")
     numeric_df = numeric_df.dropna()
     if numeric_df.shape[1] < 2:
         raise ValueError("Need at least 2 numeric columns with no missing values to cluster on.")
@@ -1000,19 +1138,48 @@ def cluster_dataset(df: pd.DataFrame, feature_columns: list[str] | None = None, 
 
     X = StandardScaler().fit_transform(numeric_df)
 
-    best_k, best_score, best_labels = None, -1.0, None
-    for k in range(2, min(max_k, len(numeric_df) - 1) + 1):
-        labels = KMeans(n_clusters=k, random_state=RANDOM_STATE, n_init=10).fit_predict(X)
-        score = silhouette_score(X, labels)
-        if score > best_score:
-            best_k, best_score, best_labels = k, score, labels
+    noise_count = 0
+    silhouette: float | None = None
+    if algorithm == "dbscan":
+        labels = DBSCAN(eps=eps, min_samples=min_samples).fit_predict(X)
+        noise_mask = labels == -1
+        noise_count = int(noise_mask.sum())
+        scored_labels = labels[~noise_mask]
+        scored_rows = X[~noise_mask]
+        unique_labels = np.unique(scored_labels)
+        if 2 <= len(unique_labels) < len(scored_labels):
+            silhouette = float(silhouette_score(scored_rows, scored_labels))
+    else:
+        best_score = -1.0
+        best_labels: np.ndarray | None = None
+        for k in range(2, min(max_k, len(numeric_df) - 1) + 1):
+            if algorithm == "kmeans":
+                candidate_labels = KMeans(n_clusters=k, random_state=RANDOM_STATE, n_init=10).fit_predict(X)
+            else:
+                candidate_labels = AgglomerativeClustering(n_clusters=k, linkage="ward").fit_predict(X)
+            unique_labels = np.unique(candidate_labels)
+            if not 2 <= len(unique_labels) < len(candidate_labels):
+                continue
+            try:
+                candidate_score = float(silhouette_score(X, candidate_labels))
+            except ValueError:
+                continue
+            if candidate_score > best_score:
+                best_score = candidate_score
+                best_labels = candidate_labels
+        if best_labels is None:
+            raise ValueError("Could not identify two distinct clusters in the selected features.")
+        labels = best_labels
+        silhouette = best_score
 
-    cluster_sizes = pd.Series(best_labels).value_counts().sort_index()
-    cluster_profiles = numeric_df.assign(_cluster=best_labels).groupby("_cluster").mean().round(3)
+    cluster_sizes = pd.Series(labels).value_counts().sort_index()
+    cluster_profiles = numeric_df.assign(_cluster=labels).groupby("_cluster").mean().round(3)
 
     return {
-        "n_clusters": best_k,
-        "silhouette_score": round(float(best_score), 4),
+        "algorithm": algorithm,
+        "n_clusters": len(set(labels) - {-1}),
+        "noise_count": noise_count,
+        "silhouette_score": round(silhouette, 4) if silhouette is not None else None,
         "cluster_sizes": cluster_sizes.to_dict(),
         "cluster_profiles": cluster_profiles.to_dict(orient="index"),
         "feature_columns": list(numeric_df.columns),
