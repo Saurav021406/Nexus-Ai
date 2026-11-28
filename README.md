@@ -74,4 +74,4 @@ SMTP_FROM_EMAIL=
 
 The SMTP server must support STARTTLS on the configured port. Email alerts are sent to the signed-in Supabase account address and only for monitors where email delivery was explicitly enabled. SMTP credentials belong only in the backend environment; do not put them in the frontend or commit them.
 
-Run `backend/monitoring_tables.sql` in the Supabase SQL Editor to create or update the monitoring tables before creating monitors. `backend/monitoring_demo_kpi.sql` provides a sample KPI table for testing.
+Run `backend/monitoring_tables.sql` in the Supabase SQL Editor to create or update the monitoring tables before creating monitors. `backend/monitoring_demo_kpi.sql` provides a sample KPI table for testing..
